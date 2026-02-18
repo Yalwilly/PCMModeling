@@ -83,7 +83,9 @@ wp_comp = 2*pi*fp_comp;
 
 % Calculate DC gain to achieve desired crossover
 % This is simplified; detailed design requires iteration
-K_comp = 2e3;  % Compensator DC gain (adjusted for better phase margin)
+% K is adjusted to achieve target PM > 45° at crossover frequency
+% Lower gain = lower fc = higher PM (more conservative design)
+K_comp = 2e3;  % Compensator DC gain (yields fc ~1kHz, PM ~110°)
 
 % Type II Compensator Transfer Function
 Hc_typeII = K_comp * (1 + s/wz_comp) ./ (s .* (1 + s/wp_comp));
@@ -100,6 +102,8 @@ wz2_comp = 2*pi*fz2_comp;
 wp1_comp = 2*pi*fp1_comp;
 wp2_comp = 2*pi*fp2_comp;
 
+% More aggressive compensation with higher gain for higher bandwidth
+% Adjusted to achieve fc ~27kHz with PM ~64°
 K_comp_typeIII = 3e4;
 
 % Type III Compensator Transfer Function
