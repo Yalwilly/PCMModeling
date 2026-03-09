@@ -42,7 +42,7 @@ Alpha = (sf - se)/(sn + se);
 mc    = 1 + se/sn;                   % Compensation ratio
 
 %% ==================== OUTPUT FILTER ====================
-R    = 1e-3;        % Load resistance (Ohm)
+R    = 400e-3;        % Load resistance (Ohm)
 C    = 22e-6;       % Output capacitance (F)
 Resr = 10e-3;       % ESR (Ohm)
 
@@ -75,9 +75,9 @@ Ki = 8e07;     % Integral gain
 Kd = 0;        % Derivative gain
 
 % Discrete PID coefficients (for reference/documentation)
-K1 = Kp + Ki + Kd;
-K2 = -Kp - 2*Kd;
-K3 = Kd;
+K1 = Kp + Ki*Ts + Kd/Ts;
+K2 = -Kp - 2*Kd/Ts;
+K3 = Kd/Ts;
 
 %% ==================== DIGITAL BLOCK PARAMETERS ====================
 wp_dac  = 2*pi*500e3;   % DAC reconstruction pole (rad/s)
@@ -101,7 +101,7 @@ end
 
 %% ==================== DIGITAL BLOCKS ====================
 % Blanking delay (Pade approximation)
-Tblank = 32e-9;
+Tblank = 15e-9;
 [numBlank, denBlank] = pade(Tblank, 2);
 Hblank = tf(numBlank, denBlank);
 
@@ -172,3 +172,16 @@ subplot(2,1,2)
 step(Tc);    grid on; title('Analog Closed-Loop Step Response (Tc)');
 
 %% ---------------------------------------------------------- %%
+
+
+function [Kp_out, Ki_out, Kd_out] = k123_to_pid(K1, K2, K3, Ts)
+    Kd_out = K3 * Ts;
+    Kp_out = -K2 - 2*K3;
+    Ki_out = (K1 + K2 + K3) / Ts;
+end
+
+function [K1_out, K2_out, K3_out] = pid_to_k123(Kp, Ki, Kd, Ts)
+    K1_out = Kp + Ki*Ts + Kd/Ts;
+    K2_out = -Kp - 2*Kd/Ts;
+    K3_out = Kd/Ts;
+end
