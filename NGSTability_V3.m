@@ -71,8 +71,8 @@ wz_esr = 1/(C*Resr);              % ESR zero frequency (rad/s)
 
 %% ==================== DIGITAL PID GAINS ====================
 Kp = 50;       % Proportional gain
-Ki = 8e07;     % Integral gain
-Kd = 0;        % Derivative gain
+Ki = 1e07;     % Integral gain
+Kd = 1e-06;        % Derivative gain
 
 % Discrete PID coefficients (for reference/documentation)
 K1 = Kp + Ki*Ts + Kd/Ts;
@@ -109,9 +109,13 @@ Hblank = tf(numBlank, denBlank);
 [numD, denD] = pade(Td, 2);
 Delay = tf(numD, denD);
 
-% ZOH Model (using Pade for exponential delay)
-% Note: Using T256 (digital clock period) for ZOH — represents
-% the sigma-delta oversampling clock, not the switching period.
+% ZOH Model — use SWITCHING PERIOD, not digital clock period
+% The PID output updates the comparator threshold once per switching cycle.
+% T256 only applies to the ADC oversampling, not the control update rate.
+[numZ_sw, denZ_sw] = pade(Ts/2, 2);         % half-period transport delay
+Hzoh_sw = (1 - tf(numZ_sw, denZ_sw)) / (Ts*s);  % ZOH at fs
+
+% ADC ZOH still at T256 (sigma-delta oversampling)
 [numZ, denZ] = pade(T256, 1);
 Hzoh = (1 - tf(numZ, denZ)) / (T256*s);
 
@@ -126,8 +130,8 @@ Hpid = Kp + Ki/s + (Kd*s)/(Tf*s + 1);
 % DAC reconstruction filter
 Hdac = Vref / (1 + s/wp_dac);
 
-% Complete digital compensator chain
-Hdig = minreal(Hadc * Hpid * Hdac * Hblank * Delay);
+% Complete digital compensator chain — include switching-rate ZOH
+Hdig = minreal(Hadc * Hpid * Hdac * Hblank * Delay * Hzoh_sw);
 
 %% ==================== PLANT & LOOP GAINS ====================
 Gvc = minreal(Hdc * Fp * Fh);    % Vout/Vc (PCM control-to-output)
@@ -170,6 +174,36 @@ subplot(2,1,1)
 step(Tloop); grid on; title('Digital Closed-Loop Step Response (Tloop)');
 subplot(2,1,2)
 step(Tc);    grid on; title('Analog Closed-Loop Step Response (Tc)');
+
+%% ==================== DIAGNOSTIC: PHASE CONTRIBUTION ====================
+fprintf('\n===== PHASE BUDGET AT CROSSOVER (%.0f kHz) =====\n', fc/1e3);
+
+blocks = {Hadc, Hpid, Hdac, Hblank, Delay, Gvc*H};
+names  = {'ADC', 'PID', 'DAC', 'Blanking', 'CompDelay', 'Plant*H'};
+
+total_phase = 0;
+for k = 1:length(blocks)
+    [~, ph] = bode(blocks{k}, 2*pi*fc);
+    fprintf('  %-12s: %+7.1f deg\n', names{k}, ph);
+    total_phase = total_phase + ph;
+end
+fprintf('  %-12s: %+7.1f deg\n', 'TOTAL', total_phase);
+fprintf('  %-12s: %+7.1f deg\n', 'Phase Margin', total_phase + 180);
+
+%% ==================== WHAT-IF: MATCH AMS DELAY ====================
+% Adjust this until MATLAB matches AMS behavior
+Td_ams = 80e-9;   % <-- Increase until MATLAB also goes unstable
+[nAms, dAms] = pade(Td_ams, 3);
+Hdelay_ams = tf(nAms, dAms);
+
+Hdig_ams = minreal(Hadc * Hpid * Hdac * Hdelay_ams);
+Lloop_ams = Hdig_ams * Gvc * H;
+[~, Pm_ams] = margin(Lloop_ams);
+fprintf('\nWith %.0f ns total delay: PM = %.1f deg\n', Td_ams*1e9, Pm_ams);
+
+figure; margin(Lloop_ams, w);
+title(sprintf('Loop Gain with %.0f ns AMS-matched delay (PM=%.1f°)', Td_ams*1e9, Pm_ams));
+grid on;
 
 %% ---------------------------------------------------------- %%
 
