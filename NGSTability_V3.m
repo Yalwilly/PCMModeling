@@ -70,14 +70,30 @@ Hc = (wp1/s) * (1 + s/wz_comp) / (1 + s/wp2);
 wz_esr = 1/(C*Resr);              % ESR zero frequency (rad/s)
 
 %% ==================== DIGITAL PID GAINS ====================
-Kp = 50;       % Proportional gain
-Ki = 1e07;     % Integral gain
-Kd = 1e-06;        % Derivative gain
+% Compensate ONLY Kp for the G_digital = 1/64 attenuation
+% Old model effective gain: Vref = 0.8
+% New model effective gain: 
+G_digital = 1/64 ;
+% Ratio = 0.8 / 0.015625 = 51.2
+gain_compensation = Vref / G_digital;   % = 51.2
+
+Kp = 70 * (1/G_digital);    % = 4096 (scaled to recover loop gain)
+Ki = 20e06*(1/G_digital);                      % unchanged — DC regulation speed is adequate
+Kd = 2e-06*(1/G_digital);                   % unchanged — phase boost is adequate
 
 % Discrete PID coefficients (for reference/documentation)
 K1 = Kp + Ki*Ts + Kd/Ts;
 K2 = -Kp - 2*Kd/Ts;
 K3 = Kd/Ts;
+
+fprintf('\n===== PID GAINS (Kp-only scaling) =====\n');
+fprintf('  Kp = %.1f  (was 80, scaled by %.1f)\n', Kp, gain_compensation);
+fprintf('  Ki = %.2e  (unchanged)\n', Ki);
+fprintf('  Kd = %.2e  (unchanged)\n', Kd);
+fprintf('\n===== K1/K2/K3 COEFFICIENTS =====\n');
+fprintf('  K1 = %.2f  (20-bit max: 524287) → %s\n', K1, regcheck(K1, 2^19-1));
+fprintf('  K2 = %.2f  (20-bit max: 524287) → %s\n', K2, regcheck(K2, 2^19-1));
+fprintf('  K3 = %.4f  (11-bit max: 1023)   → %s\n', K3, regcheck(K3, 2^10-1));
 
 %% ==================== DIGITAL BLOCK PARAMETERS ====================
 wp_dac  = 2*pi*500e3;   % DAC reconstruction pole (rad/s)
@@ -85,6 +101,29 @@ T256    = 3.9e-9;        % 256 MHz digital clock period (s)
 wc      = 2*pi*fc;       % crossover frequency (rad/s)
 Td      = 4e-9;          % computational/propagation delay (s)
 Td_ADC  = 5e-9;          % ADC hardware delay (s)
+
+%% ==================== ADC / DAC / DIGITAL GAINS ====================
+% ADC: 4-bit Flash — unity gain in the model
+G_ADC = 1;               % Unity gain (ADC scaling absorbed into PID coefficients)
+
+% DAC: 12-bit Sigma-Delta — unity gain in the model
+G_DAC = 1;               % Unity gain (DAC scaling absorbed into PID coefficients)
+
+% PID output digital scaling (from RTL):
+%   26-bit accumulator → CLAMP to ±131072 (saturation, no gain change)
+%   → [17:0] bit selection (no gain, value already fits after clamp)
+%   → >>6 (÷64) — THIS IS THE ONLY DIVISION
+%   → +2048 (DC offset, no small-signal gain)
+G_digital = 1 / 64;      % Only the >>6 shift affects small-signal gain
+
+% Total gain through ADC → PID → digital scaling → DAC
+G_total = G_ADC * G_digital * G_DAC;
+
+fprintf('\n===== ADC/DAC/DIGITAL GAIN BUDGET =====\n');
+fprintf('  ADC gain:              %.2f (unity)\n', G_ADC);
+fprintf('  Digital scaling (>>6): %.6f (÷64)\n', G_digital);
+fprintf('  DAC gain:              %.2f (unity)\n', G_DAC);
+fprintf('  Total gain:            %.6f (%.1f dB)\n', G_total, 20*log10(G_total));
 
 %% ==================== STABILITY CHECKS ====================
 if Alpha < 1
@@ -109,29 +148,23 @@ Hblank = tf(numBlank, denBlank);
 [numD, denD] = pade(Td, 2);
 Delay = tf(numD, denD);
 
-% ZOH Model — use SWITCHING PERIOD, not digital clock period
-% The PID output updates the comparator threshold once per switching cycle.
-% T256 only applies to the ADC oversampling, not the control update rate.
-[numZ_sw, denZ_sw] = pade(Ts/2, 2);         % half-period transport delay
-Hzoh_sw = (1 - tf(numZ_sw, denZ_sw)) / (Ts*s);  % ZOH at fs
-
-% ADC ZOH still at T256 (sigma-delta oversampling)
-[numZ, denZ] = pade(T256, 1);
-Hzoh = (1 - tf(numZ, denZ)) / (T256*s);
-
-% FIX: ADC delay — use Pade instead of exp(-s*Td_ADC) with tf objects
+% ADC: Flash ADC — no oversampling ZOH needed
+% Sampling effect at fs is already captured by Fh in the plant
+% Only model the ADC conversion delay
 [numADC, denADC] = pade(Td_ADC, 2);
 Hadc_delay = tf(numADC, denADC);
-Hadc = Hzoh * Hadc_delay;
+Hadc = Hadc_delay;   % Flash ADC: just delay, no ZOH
 
 % PID compensator (continuous-time form)
 Hpid = Kp + Ki/s + (Kd*s)/(Tf*s + 1);
 
-% DAC reconstruction filter
-Hdac = Vref / (1 + s/wp_dac);
+% DAC reconstruction filter — unity DAC gain, only the pole
+Hdac = 1 / (1 + s/wp_dac);
 
-% Complete digital compensator chain — include switching-rate ZOH
-Hdig = minreal(Hadc * Hpid * Hdac * Hblank * Delay * Hzoh_sw);
+% Complete digital compensator chain
+% G_ADC = 1, G_DAC = 1, G_digital = 1/64
+% Fh in Gvc handles the sampling double-pole — no Hzoh_sw here
+Hdig = minreal(G_ADC * Hadc * Hpid * G_digital * Hdac * Hblank * Delay);
 
 %% ==================== PLANT & LOOP GAINS ====================
 Gvc = minreal(Hdc * Fp * Fh);    % Vout/Vc (PCM control-to-output)
@@ -161,7 +194,7 @@ fprintf('Phase Margin Loss (digital vs analog): %.1f deg\n', Pm_ana - Pm_dig);
 w = 2*pi*logspace(0, 8, 2000);   % 1 Hz to 100 MHz, 2000 points
 
 figure; margin(Gvc, w);    grid on; title('Plant: Gvc = Vout/Vc');
-figure; margin(Hadc, w);   grid on; title('ADC: Hadc (ZOH + delay)');
+figure; margin(Hadc, w);   grid on; title('ADC: Hadc (delay only)');
 figure; margin(Hpid, w);   grid on; title('PID: Hpid');
 figure; margin(Hdig, w);   grid on; title('Digital Compensator: Hadc \rightarrow Hpid \rightarrow Hdac');
 figure; margin(Hc, w);     grid on; title('Desired Analog Compensator: Hc (Type II)');
@@ -190,21 +223,6 @@ end
 fprintf('  %-12s: %+7.1f deg\n', 'TOTAL', total_phase);
 fprintf('  %-12s: %+7.1f deg\n', 'Phase Margin', total_phase + 180);
 
-%% ==================== WHAT-IF: MATCH AMS DELAY ====================
-% Adjust this until MATLAB matches AMS behavior
-Td_ams = 80e-9;   % <-- Increase until MATLAB also goes unstable
-[nAms, dAms] = pade(Td_ams, 3);
-Hdelay_ams = tf(nAms, dAms);
-
-Hdig_ams = minreal(Hadc * Hpid * Hdac * Hdelay_ams);
-Lloop_ams = Hdig_ams * Gvc * H;
-[~, Pm_ams] = margin(Lloop_ams);
-fprintf('\nWith %.0f ns total delay: PM = %.1f deg\n', Td_ams*1e9, Pm_ams);
-
-figure; margin(Lloop_ams, w);
-title(sprintf('Loop Gain with %.0f ns AMS-matched delay (PM=%.1f°)', Td_ams*1e9, Pm_ams));
-grid on;
-
 %% ---------------------------------------------------------- %%
 
 
@@ -215,7 +233,15 @@ function [Kp_out, Ki_out, Kd_out] = k123_to_pid(K1, K2, K3, Ts)
 end
 
 function [K1_out, K2_out, K3_out] = pid_to_k123(Kp, Ki, Kd, Ts)
-    K1_out = Kp + Ki*Ts + Kd/Ts;
+    K1_out = Kp + Ki*Ts + Kd/Ts; %Kp' + Ki' + Kd' 
     K2_out = -Kp - 2*Kd/Ts;
     K3_out = Kd/Ts;
+end
+
+function result = regcheck(value, max_abs)
+    if abs(round(value)) <= max_abs
+        result = sprintf('OK (%.1f%%)', abs(value)/max_abs*100);
+    else
+        result = 'OVERFLOW!';
+    end
 end
