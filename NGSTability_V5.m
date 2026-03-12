@@ -1,0 +1,436 @@
+% filepath: c:\Users\yalwilly\OneDrive - Intel Corporation\Documents\yazn\work\Next Gen DC2DC\PCM Modeling\PCMModeling\PCMModeling\NGSTability_V5.m
+%% ====== NGSTability_V5.m ======
+% PCM Buck Converter Stability Analysis
+% Cleaned model:
+% - ADC gain = 1
+% - DAC gain = 1
+% - Digital scaling = 1/64 from RTL >>6
+% - Controller modeled from RTL K1/K2/K3
+% - Quantized coefficients included in the model
+
+clear; close all; clc;
+s = tf('s');
+
+PLOT_GRAPHS = true;            % set to true or false
+CONTROLLER_DOMAIN = 'laplace';  % 'laplace' or 'z'
+USE_SMALL_SIGNAL_ADC_DAC = true; % true: use ADC/DAC small-signal gains, false: unity gains
+PHASE_YLIM = [-270 90];         % force same visible phase range for analog/digital
+
+%% ==================== FEEDBACK NETWORK ====================
+beta = 0.5;
+H = beta;
+
+%% ==================== CONVERTER PARAMETERS ====================
+VOUT = 0.8;
+VIN  = 3.3;
+Lind = 0.47e-6;
+Vref = 0.8;
+
+fs   = 6e6;
+Ts   = 1/fs;
+fc   = fs/10;
+Tf   = 1/(10*fc);
+fdig = 256e6;
+Tdig = 1/fdig;
+
+%% ==================== CURRENT SENSING ====================
+GI     = (1/3200)*(10/64)*(1/4);
+Rsense = 8e3;
+Ri     = GI * Rsense;
+
+%% ==================== DUTY CYCLE ====================
+D     = VOUT/VIN;
+D_tag = 1 - D;
+
+%% ==================== SLOPE COMPENSATION ====================
+se   = 0.7e6;
+sn   = (VIN - VOUT)/Lind;
+sf   = VOUT/Lind;
+seff = Ri*(VIN - VOUT)/Lind + se;
+
+Alpha = (sf - se)/(sn + se);
+mc    = 1 + se/sn;
+
+%% ==================== OUTPUT FILTER ====================
+R    = 400e-3;
+C    = 22e-6;
+Resr = 10e-3;
+
+%% ==================== PCM PLANT PARAMETERS ====================
+wp = 1/(C*R) + (Ts*(mc*D_tag - 0.5)/(Lind*C));
+wn = pi/Ts;
+Qp = 1/(pi*(mc*D_tag - 0.5));
+
+%% ==================== ANALOG COMPENSATOR (REFERENCE) ====================
+R1 = sqrt(1 - 4*(fc^2)*(Ts^2) + 16*(fc^4)*(Ts^4));
+R2 = sqrt(1 + (39.48*(C^2)*(fc^2)*(Lind^2)*(R^2)) / ((Lind + 0.32*R*Ts)^2));
+
+wz_comp = 2*pi*fc/5;
+wp2     = 1/(C*Resr);
+wp1     = (1.23*fc*Ri*R1*R2*(Lind + 0.32*R*Ts)) / (Lind*R);
+
+Hdc = (R/Ri) * (1 / (1 + R*Ts*(mc*D_tag - 0.5)/Lind));
+Fp  = (1 + s*C*Resr) / (1 + s/wp);
+Fh  = 1 / (1 + s/(wn*Qp) + (s^2)/(wn^2));
+Hc  = (wp1/s) * (1 + s/wz_comp) / (1 + s/wp2);
+
+%% ==================== RTL DIGITAL GAIN MODEL ====================
+SHIFT_BITS = 6;
+G_digital  = 2^(-SHIFT_BITS);   % RTL >>6
+
+% ADC / DAC definitions
+N_ADC    = 4;
+VADC_MIN = 0.35;                % V
+VADC_MAX = 0.45;                % V
+V_FS_ADC = VADC_MAX - VADC_MIN; % 0.1 V
+
+N_DAC    = 12;
+V_FS_DAC = 1.2;                 % V
+
+if USE_SMALL_SIGNAL_ADC_DAC
+    % Small-signal linear gains
+    G_ADC = (2^N_ADC) / V_FS_ADC;   % codes/V
+    G_DAC = V_FS_DAC / (2^N_DAC);   % V/code
+    adc_dac_mode_text = 'small-signal ADC/DAC gains';
+else
+    % Normalized unity gains
+    G_ADC = 1;
+    G_DAC = 1;
+    adc_dac_mode_text = 'unity ADC/DAC gains';
+end
+
+G_adc_dac = G_ADC * G_DAC;          % interface gain only
+G_total   = G_adc_dac * G_digital;  % full chain gain
+
+fprintf('\n===== ADC / DAC MODEL SELECTION =====\n');
+fprintf('  USE_SMALL_SIGNAL_ADC_DAC = %d (%s)\n', USE_SMALL_SIGNAL_ADC_DAC, adc_dac_mode_text);
+fprintf('  G_ADC     = %.6e\n', G_ADC);
+fprintf('  G_DAC     = %.6e\n', G_DAC);
+fprintf('  G_adc_dac = %.6e\n', G_adc_dac);
+fprintf('  G_total   = %.6e\n', G_total);
+
+%% ==================== TARGET CONTROLLER PID GAINS ====================
+% These are the desired controller gains after RTL >>6 only.
+% ADC and DAC stay as separate transfer-function gains in Hdig.
+Kp_target = 23.43;
+Ki_target = 9.375000e+04;
+Kd_target = 1.1719e-07;
+
+% Programmed gains before RTL >>6
+Kp_prog = Kp_target / G_digital;
+Ki_prog = Ki_target / G_digital;
+Kd_prog = Kd_target / G_digital;
+
+% Convert to RTL coefficients and quantize to integer registers
+K1_real = Kp_prog + Ki_prog*Ts + Kd_prog/Ts;
+K2_real = -Kp_prog - 2*Kd_prog/Ts;
+K3_real = Kd_prog/Ts;
+
+K1 = round(K1_real);
+K2 = round(K2_real);
+K3 = round(K3_real);
+
+% Recover actual programmed PID gains from quantized K1/K2/K3
+[Kp_prog_q, Ki_prog_q, Kd_prog_q] = k123_to_pid(K1, K2, K3, Ts);
+
+% Effective controller gains after RTL >>6 only
+Kp_ctrl_eff = Kp_prog_q * G_digital;
+Ki_ctrl_eff = Ki_prog_q * G_digital;
+Kd_ctrl_eff = Kd_prog_q * G_digital;
+
+% Optional: total path-scaled values for reporting only
+Kp_path_eff = Kp_ctrl_eff * G_adc_dac;
+Ki_path_eff = Ki_ctrl_eff * G_adc_dac;
+Kd_path_eff = Kd_ctrl_eff * G_adc_dac;
+
+fprintf('\n===== RTL DIGITAL CONTROLLER =====\n');
+fprintf('Shift scaling: G_digital = 1/%d = %.6f\n', 2^SHIFT_BITS, G_digital);
+
+fprintf('\nADC / DAC gains:\n');
+fprintf('  G_ADC     = %.6e\n', G_ADC);
+fprintf('  G_DAC     = %.6e\n', G_DAC);
+fprintf('  G_adc_dac = %.6e\n', G_adc_dac);
+
+fprintf('\nTarget controller gains after >>6 only:\n');
+fprintf('  Kp_target = %.6f\n', Kp_target);
+fprintf('  Ki_target = %.6e\n', Ki_target);
+fprintf('  Kd_target = %.6e\n', Kd_target);
+
+fprintf('\nProgrammed gains before >>6:\n');
+fprintf('  Kp_prog = %.6f\n', Kp_prog);
+fprintf('  Ki_prog = %.6e\n', Ki_prog);
+fprintf('  Kd_prog = %.6e\n', Kd_prog);
+
+fprintf('\nQuantized RTL coefficients:\n');
+fprintf('  K1 = %d   (20-bit max: 524287) -> %s\n', K1, regcheck(K1, 2^19-1));
+fprintf('  K2 = %d   (20-bit max: 524287) -> %s\n', K2, regcheck(K2, 2^19-1));
+fprintf('  K3 = %d   (11-bit max: 1023)   -> %s\n', K3, regcheck(K3, 2^10-1));
+
+fprintf('\nRecovered programmed gains from quantized K1/K2/K3:\n');
+fprintf('  Kp_prog_q = %.6f\n', Kp_prog_q);
+fprintf('  Ki_prog_q = %.6e\n', Ki_prog_q);
+fprintf('  Kd_prog_q = %.6e\n', Kd_prog_q);
+
+fprintf('\nEffective controller gains after >>6 only:\n');
+fprintf('  Kp_ctrl_eff = %.6f\n', Kp_ctrl_eff);
+fprintf('  Ki_ctrl_eff = %.6e\n', Ki_ctrl_eff);
+fprintf('  Kd_ctrl_eff = %.6e\n', Kd_ctrl_eff);
+
+fprintf('\nPath-scaled values after ADC/DAC/>>6 (report only):\n');
+fprintf('  Kp_path_eff = %.6e\n', Kp_path_eff);
+fprintf('  Ki_path_eff = %.6e\n', Ki_path_eff);
+fprintf('  Kd_path_eff = %.6e\n', Kd_path_eff);
+
+%% ==================== DIGITAL BLOCK PARAMETERS ====================
+wp_dac  = 2*pi*500e3;
+Td      = 4e-9;
+Td_ADC  = 5e-9;
+Tblank  = 32e-9;
+
+%% ==================== STABILITY CHECKS ====================
+if Alpha < 1
+    disp('Alpha is less than 1 - the FB loop is stable');
+else
+    disp('Alpha is greater than 1 - the FB loop isnt stable');
+end
+
+if se > 0.5*sf
+    disp('The buck converter stable for all D');
+else
+    disp('The buck converter isnt stable for all D - increase ma');
+end
+
+%% ==================== DIGITAL BLOCKS ====================
+[numBlank, denBlank] = pade(Tblank, 2);
+Hblank = tf(numBlank, denBlank);
+
+[numD, denD] = pade(Td, 2);
+Delay = tf(numD, denD);
+
+[numADC, denADC] = pade(Td_ADC, 2);
+Hadc = tf(numADC, denADC);
+
+Hdac = 1 / (1 + s/wp_dac);
+
+switch lower(CONTROLLER_DOMAIN)
+    case 'laplace'
+        % Continuous PID using recovered programmed gains
+        Hpid = Kp_prog_q + Ki_prog_q/s + (Kd_prog_q*s)/(Tf*s + 1);
+
+        % Complete digital chain
+        Hdig = minreal(G_ADC * Hadc * Hpid * G_digital * G_DAC * Hdac * Hblank * Delay);
+        controller_title = 'Digital Controller in Laplace Domain';
+        controller_phase_name = 'RTL PID(Laplace)';
+
+    case 'z'
+        % Exact RTL controller in z-domain
+        Cz = tf([K1 K2 K3], [1 -1], Ts, 'Variable', 'z^-1');
+
+        % Convert only for plotting/continuous loop combination
+        Hpid = d2c(G_digital * Cz, 'tustin');
+
+        % G_digital already absorbed into Hpid
+        Hdig = minreal(G_ADC * Hadc * Hpid * G_DAC * Hdac * Hblank * Delay);
+        controller_title = 'Digital Controller from Z Domain';
+        controller_phase_name = 'RTL PID(Z)';
+
+    otherwise
+        error('CONTROLLER_DOMAIN must be ''laplace'' or ''z''.');
+end
+
+fprintf('\n===== CONTROLLER MODEL SELECTION =====\n');
+fprintf('  CONTROLLER_DOMAIN = %s\n', CONTROLLER_DOMAIN);
+
+%% ==================== PLANT & LOOP GAINS ====================
+Gvc   = minreal(Hdc * Fp * Fh);
+Lloop = Hdig * Gvc * H;
+Tloop = feedback(Lloop, 1);
+
+Lc = Hc * Gvc * H;
+Tc = feedback(Lc, 1);
+
+%% ==================== STABILITY MARGINS ====================
+[Gm_dig, Pm_dig, Wcg_dig, Wcp_dig] = margin(Lloop);
+[Gm_ana, Pm_ana, Wcg_ana, Wcp_ana] = margin(Lc);
+
+fprintf('\n===== ADC/DAC/DIGITAL GAIN BUDGET =====\n');
+fprintf('  Mode:                  %s\n', adc_dac_mode_text);
+fprintf('  ADC gain:              %.6e\n', G_ADC);
+fprintf('  Digital scaling (>>6): %.6e\n', G_digital);
+fprintf('  DAC gain:              %.6e\n', G_DAC);
+fprintf('  Total gain:            %.6e (%.1f dB)\n', G_total, 20*log10(G_total));
+
+fprintf('\n===== STABILITY SUMMARY =====\n');
+fprintf('Digital Loop:\n');
+fprintf('  Gain Margin:  %.1f dB at %.1f kHz\n', 20*log10(Gm_dig), Wcg_dig/(2*pi*1e3));
+fprintf('  Phase Margin: %.1f deg at %.1f kHz\n', Pm_dig, Wcp_dig/(2*pi*1e3));
+fprintf('  Crossover:    %.1f kHz\n', Wcp_dig/(2*pi*1e3));
+
+fprintf('Analog Loop:\n');
+fprintf('  Gain Margin:  %.1f dB at %.1f kHz\n', 20*log10(Gm_ana), Wcg_ana/(2*pi*1e3));
+fprintf('  Phase Margin: %.1f deg at %.1f kHz\n', Pm_ana, Wcp_ana/(2*pi*1e3));
+fprintf('  Crossover:    %.1f kHz\n', Wcp_ana/(2*pi*1e3));
+
+fprintf('Phase Margin Loss (digital vs analog): %.1f deg\n', Pm_ana - Pm_dig);
+
+%% ==================== BODE PLOTS ====================
+if PLOT_GRAPHS
+    w = 2*pi*logspace(0, 8, 2000);
+
+    % Original plot windows
+    figure; margin(Gvc, w);    grid on; title('Plant: Gvc = Vout/Vc');
+    figure; margin(Hadc, w);   grid on; title('ADC: Hadc');
+    figure; margin(Hpid, w);   grid on; title(controller_title);
+    figure; margin(Hdig, w);   grid on; title('Digital Compensator Chain');
+    figure; margin(Hc, w);     grid on; title('Analog Compensator Hc');
+    figure; margin(Lc, w);     grid on; title('Analog Loop Gain');
+    figure; margin(Lloop, w);  grid on; title('Digital Loop Gain');
+
+    % Comparison plots with identical phase branch and limits
+    opts = bodeoptions;
+    opts.Grid = 'on';
+    opts.PhaseWrapping = 'on';
+    opts.PhaseWrappingBranch = -180;
+    opts.FreqUnits = 'Hz';
+    opts.XLimMode = 'manual';
+    opts.XLim = [1 1e8];
+
+    figure;
+    bodeplot(Hc, Hpid, w, opts);
+    title('Compensator Comparison: Analog Hc vs Digital Hpid');
+    legend('Analog Hc', 'Digital Hpid', 'Location', 'best');
+    % force_bode_phase_ylim(gcf, PHASE_YLIM);
+
+    figure;
+    bodeplot(Lc, Lloop, w, opts);
+    title('Loop Gain Comparison: Analog vs Digital');
+    legend('Analog Loop', 'Digital Loop', 'Location', 'best');
+    % force_bode_phase_ylim(gcf, PHASE_YLIM);
+end
+
+%% ==================== STEP RESPONSE ====================
+if PLOT_GRAPHS
+    figure;
+    subplot(2,1,1);
+    step(Tloop);
+    grid on;
+    title('Digital Closed-Loop Step Response');
+
+    subplot(2,1,2);
+    step(Tc);
+    grid on;
+    title('Analog Closed-Loop Step Response');
+end
+
+%% ==================== PHASE BUDGET ====================
+fprintf('\n===== PHASE BUDGET AT CROSSOVER (%.0f kHz) =====\n', fc/1e3);
+
+blocks = {Hadc, Hpid, Hdac, Hblank, Delay, Gvc*H};
+names  = {'ADC', controller_phase_name, 'DAC', 'Blanking', 'CompDelay', 'Plant*H'};
+
+total_phase = 0;
+for k = 1:length(blocks)
+    [~, ph] = bode(blocks{k}, 2*pi*fc);
+    ph = squeeze(ph);
+    fprintf('  %-12s: %+7.1f deg\n', names{k}, ph);
+    total_phase = total_phase + ph;
+end
+fprintf('  %-12s: %+7.1f deg\n', 'TOTAL', total_phase);
+fprintf('  %-12s: %+7.1f deg\n', 'Phase Margin', total_phase + 180);
+
+%% ==================== NOTES ====================
+fprintf('\n===== NOTES =====\n');
+fprintf('1. This file models the RTL controller using K1/K2/K3.\n');
+fprintf('2. The >>6 is represented explicitly as G_digital = 1/64.\n');
+fprintf('3. ADC/DAC mode: %s.\n', adc_dac_mode_text);
+fprintf('4. For AMS load-step correlation, a nonlinear cycle-by-cycle model is still recommended.\n');
+
+%% ==================== LAB POSITION REPORT ====================
+[P_lab, I_lab, D_lab] = k123_to_lab_position(K1, K2, K3);
+
+fprintf('\nLab Position values:\n');
+fprintf('  Position[0] (P) = %d\n', round(P_lab));
+fprintf('  Position[1] (I) = %d\n', round(I_lab));
+fprintf('  Position[2] (D) = %d\n', round(D_lab));
+
+fprintf('\nC# programming line:\n');
+fprintf('  ChipTC.FullChip.Power.SetPIDCofficients(1, %d, %d, %d);\n', ...
+    round(K1), round(K2), round(K3));
+
+P_in = 1500;
+I_in = 10;
+D_in = 45;
+
+[Kp_eff_lab, Ki_eff_lab, Kd_eff_lab] = lab_position_to_shifted_pid(P_in, I_in, D_in, Ts, G_digital);
+
+fprintf('\nEffective PID from Lab Position values:\n');
+fprintf('  Position[0] (P) = %d\n', P_in);
+fprintf('  Position[1] (I) = %d\n', I_in);
+fprintf('  Position[2] (D) = %d\n', D_in);
+fprintf('  Kp_eff = %.6f\n', Kp_eff_lab);
+fprintf('  Ki_eff = %.6e\n', Ki_eff_lab);
+fprintf('  Kd_eff = %.6e\n', Kd_eff_lab);
+
+%% ---------------------------------------------------------- %%%
+
+function [Kp_out, Ki_out, Kd_out] = k123_to_pid(K1, K2, K3, Ts)
+    Kd_out = K3 * Ts;
+    Kp_out = -K2 - 2*K3;
+    Ki_out = (K1 + K2 + K3) / Ts;
+end
+
+function [K1_out, K2_out, K3_out] = pid_to_k123(Kp, Ki, Kd, Ts)
+    K1_out = Kp + Ki*Ts + Kd/Ts;
+    K2_out = -Kp - 2*Kd/Ts;
+    K3_out = Kd/Ts;
+end
+
+function [P_out, I_out, D_out] = k123_to_lab_position(K1, K2, K3)
+    D_out = K3;
+    P_out = -K2 - 2*K3;
+    I_out = K1 + K2 + K3;
+end
+
+function [K1_out, K2_out, K3_out] = lab_position_to_k123(P_in, I_in, D_in)
+    K1_out = P_in + I_in + D_in;
+    K2_out = -P_in - 2*D_in;
+    K3_out = D_in;
+end
+
+function [Kp_prog, Ki_prog, Kd_prog] = lab_position_to_pid(P_in, I_in, D_in, Ts)
+    [K1_tmp, K2_tmp, K3_tmp] = lab_position_to_k123(P_in, I_in, D_in);
+    [Kp_prog, Ki_prog, Kd_prog] = k123_to_pid(K1_tmp, K2_tmp, K3_tmp, Ts);
+end
+
+function [Kp_eff, Ki_eff, Kd_eff] = lab_position_to_shifted_pid(P_in, I_in, D_in, Ts, G_digital)
+    [Kp_prog, Ki_prog, Kd_prog] = lab_position_to_pid(P_in, I_in, D_in, Ts);
+    Kp_eff = Kp_prog * G_digital;
+    Ki_eff = Ki_prog * G_digital;
+    Kd_eff = Kd_prog * G_digital;
+end
+
+function result = regcheck(value, max_abs)
+    if abs(round(value)) <= max_abs
+        result = sprintf('OK (%.1f%%)', abs(value)/max_abs*100);
+    else
+        result = 'OVERFLOW!';
+    end
+end
+
+function force_bode_phase_ylim(figHandle, phase_ylim)
+    ax = findall(figHandle, 'Type', 'axes');
+    for k = 1:numel(ax)
+        ylab = get(get(ax(k), 'YLabel'), 'String');
+
+        if iscell(ylab)
+            ylab = strjoin(ylab, ' ');
+        end
+
+        if ischar(ylab) || isstring(ylab)
+            ylab_txt = lower(string(ylab));
+            if contains(ylab_txt, "phase")
+                ylim(ax(k), phase_ylim);
+            end
+        end
+    end
+end
