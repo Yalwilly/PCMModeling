@@ -11,10 +11,30 @@
 clear; close all; clc;
 s = tf('s');
 
-PLOT_GRAPHS = true;            % set to true or false
-CONTROLLER_DOMAIN = 'laplace';  % 'laplace' or 'z'
-USE_SMALL_SIGNAL_ADC_DAC = true; % true: use ADC/DAC small-signal gains, false: unity gains
-PHASE_YLIM = [-270 90];         % force same visible phase range for analog/digital
+PLOT_BODE_GRAPHS = true;
+PLOT_SMALL_SIGNAL_GRAPHS = false;
+PLOT_LARGE_SIGNAL_GRAPHS = true;
+CONTROLLER_DOMAIN = 'z';       % 'laplace' or 'z'
+USE_SMALL_SIGNAL_ADC_DAC = false;
+PHASE_YLIM = [-270 90];
+
+SHIFT_BITS = 6;                % RTL >>6
+
+RUN_LARGE_SIGNAL_PREDICTOR = true;
+LARGE_SIGNAL_TSTOP = 100e-6;    % s
+LARGE_SIGNAL_VOUT_INIT = 0.2;   % V, initial output for predictor
+USE_QUANTIZED_ADC_DAC = true;   % exact ADC/DAC quantization in predictor
+USE_PRECLAMP_STATE = true;      % true matches RTL that stores pre-clamp state
+PID_OUT_BITS = 12;              % PID output width after >>6
+PID_OUT_OFFSET = 2^(PID_OUT_BITS-1); % 2048 midscale offset, output range 0..4095
+PID_PRECLAMP_MIN = -2048 * 2^SHIFT_BITS; % RTL MIN_VALUE = (-2048)<<6 = -131072
+PID_PRECLAMP_MAX =  2047 * 2^SHIFT_BITS; % RTL MAX_VALUE = ( 2047)<<6 =  131008
+PLOT_BINARY_CODE_AXIS = false;  % show PID/DAC code y-axis in binary
+
+DAC_VDD = 1.8;                  % V
+DAC_NMOS_VTH = 0.2;             % V
+DAC_OUT_MIN = 0.0;              % V
+DAC_OUT_MAX = DAC_VDD - DAC_NMOS_VTH; % NMOS-limited max
 
 %% ==================== FEEDBACK NETWORK ====================
 beta = 0.5;
@@ -33,8 +53,10 @@ Tf   = 1/(10*fc);
 fdig = 256e6;
 Tdig = 1/fdig;
 
+Tctrl = Tdig;   % PID / RTL update period
+
 %% ==================== CURRENT SENSING ====================
-GI     = (1/3200)*(10/64)*(1/4);
+GI     = (1/640)*(10/64)*(1/4);
 Rsense = 8e3;
 Ri     = GI * Rsense;
 
@@ -75,14 +97,13 @@ Fh  = 1 / (1 + s/(wn*Qp) + (s^2)/(wn^2));
 Hc  = (wp1/s) * (1 + s/wz_comp) / (1 + s/wp2);
 
 %% ==================== RTL DIGITAL GAIN MODEL ====================
-SHIFT_BITS = 6;
 G_digital  = 2^(-SHIFT_BITS);   % RTL >>6
 
 % ADC / DAC definitions
 N_ADC    = 4;
-VADC_MIN = 0.35;                % V
-VADC_MAX = 0.45;                % V
-V_FS_ADC = VADC_MAX - VADC_MIN; % 0.1 V
+VADC_MIN = 0.36;                % V
+VADC_MAX = 0.44;                % V
+V_FS_ADC = VADC_MAX - VADC_MIN; % 0.08 V
 
 N_DAC    = 12;
 V_FS_DAC = 1.2;                 % V
@@ -112,26 +133,31 @@ fprintf('  G_total   = %.6e\n', G_total);
 %% ==================== TARGET CONTROLLER PID GAINS ====================
 % These are the desired controller gains after RTL >>6 only.
 % ADC and DAC stay as separate transfer-function gains in Hdig.
-Kp_target = 23.43;
-Ki_target = 9.375000e+04;
-Kd_target = 1.1719e-07;
+Kp_target = 23.437500;
+Ki_target = 1.875000e+05;
+Kd_target = 1.171875e-07;
+  
 
 % Programmed gains before RTL >>6
 Kp_prog = Kp_target / G_digital;
 Ki_prog = Ki_target / G_digital;
 Kd_prog = Kd_target / G_digital;
 
-% Convert to RTL coefficients and quantize to integer registers
-K1_real = Kp_prog + Ki_prog*Ts + Kd_prog/Ts;
-K2_real = -Kp_prog - 2*Kd_prog/Ts;
-K3_real = Kd_prog/Ts;
+% Convert desired programmed PID into lab-style discrete P/I/D positions
+P_real = Kp_prog;
+I_real = Ki_prog * Ts;
+D_real = Kd_prog / Ts;
 
-K1 = round(K1_real);
-K2 = round(K2_real);
-K3 = round(K3_real);
+% Quantize at the position level, since this is what is effectively programmed
+P_cmd = round(P_real);
+I_cmd = round(I_real);
+D_cmd = round(D_real);
 
-% Recover actual programmed PID gains from quantized K1/K2/K3
-[Kp_prog_q, Ki_prog_q, Kd_prog_q] = k123_to_pid(K1, K2, K3, Ts);
+% Convert quantized positions to RTL coefficients
+[K1, K2, K3] = lab_position_to_k123(P_cmd, I_cmd, D_cmd);
+
+% Recover actual programmed PID gains from the quantized positions
+[Kp_prog_q, Ki_prog_q, Kd_prog_q] = lab_position_to_pid(P_cmd, I_cmd, D_cmd, Ts);
 
 % Effective controller gains after RTL >>6 only
 Kp_ctrl_eff = Kp_prog_q * G_digital;
@@ -143,25 +169,17 @@ Kp_path_eff = Kp_ctrl_eff * G_adc_dac;
 Ki_path_eff = Ki_ctrl_eff * G_adc_dac;
 Kd_path_eff = Kd_ctrl_eff * G_adc_dac;
 
-fprintf('\n===== RTL DIGITAL CONTROLLER =====\n');
-fprintf('Shift scaling: G_digital = 1/%d = %.6f\n', 2^SHIFT_BITS, G_digital);
+fprintf('\nIdeal lab positions before rounding:\n');
+fprintf('  P_real = %.6f\n', P_real);
+fprintf('  I_real = %.6f\n', I_real);
+fprintf('  D_real = %.6f\n', D_real);
 
-fprintf('\nADC / DAC gains:\n');
-fprintf('  G_ADC     = %.6e\n', G_ADC);
-fprintf('  G_DAC     = %.6e\n', G_DAC);
-fprintf('  G_adc_dac = %.6e\n', G_adc_dac);
+fprintf('\nQuantized lab positions:\n');
+fprintf('  Position[0] (P) = %d\n', P_cmd);
+fprintf('  Position[1] (I) = %d\n', I_cmd);
+fprintf('  Position[2] (D) = %d\n', D_cmd);
 
-fprintf('\nTarget controller gains after >>6 only:\n');
-fprintf('  Kp_target = %.6f\n', Kp_target);
-fprintf('  Ki_target = %.6e\n', Ki_target);
-fprintf('  Kd_target = %.6e\n', Kd_target);
-
-fprintf('\nProgrammed gains before >>6:\n');
-fprintf('  Kp_prog = %.6f\n', Kp_prog);
-fprintf('  Ki_prog = %.6e\n', Ki_prog);
-fprintf('  Kd_prog = %.6e\n', Kd_prog);
-
-fprintf('\nQuantized RTL coefficients:\n');
+fprintf('\nRTL coefficients from quantized positions:\n');
 fprintf('  K1 = %d   (20-bit max: 524287) -> %s\n', K1, regcheck(K1, 2^19-1));
 fprintf('  K2 = %d   (20-bit max: 524287) -> %s\n', K2, regcheck(K2, 2^19-1));
 fprintf('  K3 = %d   (11-bit max: 1023)   -> %s\n', K3, regcheck(K3, 2^10-1));
@@ -185,7 +203,7 @@ fprintf('  Kd_path_eff = %.6e\n', Kd_path_eff);
 wp_dac  = 2*pi*500e3;
 Td      = 4e-9;
 Td_ADC  = 5e-9;
-Tblank  = 32e-9;
+Tblank  = 15e-9;
 
 %% ==================== STABILITY CHECKS ====================
 if Alpha < 1
@@ -274,7 +292,7 @@ fprintf('  Crossover:    %.1f kHz\n', Wcp_ana/(2*pi*1e3));
 fprintf('Phase Margin Loss (digital vs analog): %.1f deg\n', Pm_ana - Pm_dig);
 
 %% ==================== BODE PLOTS ====================
-if PLOT_GRAPHS
+if PLOT_BODE_GRAPHS
     w = 2*pi*logspace(0, 8, 2000);
 
     % Original plot windows
@@ -309,7 +327,7 @@ if PLOT_GRAPHS
 end
 
 %% ==================== STEP RESPONSE ====================
-if PLOT_GRAPHS
+if PLOT_SMALL_SIGNAL_GRAPHS
     figure;
     subplot(2,1,1);
     step(Tloop);
@@ -347,26 +365,48 @@ fprintf('4. For AMS load-step correlation, a nonlinear cycle-by-cycle model is s
 
 %% ==================== LAB POSITION REPORT ====================
 [P_lab, I_lab, D_lab] = k123_to_lab_position(K1, K2, K3);
+[Kp_eff_from_rtl, Ki_eff_from_rtl, Kd_eff_from_rtl] = ...
+    lab_position_to_shifted_pid(P_lab, I_lab, D_lab, Ts, G_digital);
 
-fprintf('\nLab Position values:\n');
+fprintf('\n===== LAB POSITION REPORT =====\n');
+fprintf('From current RTL coefficients:\n');
+fprintf('  K1 = %d\n', K1);
+fprintf('  K2 = %d\n', K2);
+fprintf('  K3 = %d\n', K3);
+
+fprintf('\nRecovered lab positions:\n');
 fprintf('  Position[0] (P) = %d\n', round(P_lab));
 fprintf('  Position[1] (I) = %d\n', round(I_lab));
 fprintf('  Position[2] (D) = %d\n', round(D_lab));
 
-fprintf('\nC# programming line:\n');
+fprintf('\nEffective controller PID from recovered lab positions (Ts-based, after >>6):\n');
+fprintf('  Kp_eff = %.6f\n', Kp_eff_from_rtl);
+fprintf('  Ki_eff = %.6e\n', Ki_eff_from_rtl);
+fprintf('  Kd_eff = %.6e\n', Kd_eff_from_rtl);
+
+fprintf('\nProgramming line using lab positions:\n');
 fprintf('  ChipTC.FullChip.Power.SetPIDCofficients(1, %d, %d, %d);\n', ...
-    round(K1), round(K2), round(K3));
+    round(P_lab), round(I_lab), round(D_lab));
 
 P_in = 1500;
-I_in = 10;
+I_in = 2;
 D_in = 45;
 
-[Kp_eff_lab, Ki_eff_lab, Kd_eff_lab] = lab_position_to_shifted_pid(P_in, I_in, D_in, Ts, G_digital);
+[K1_in, K2_in, K3_in] = lab_position_to_k123(P_in, I_in, D_in);
+[Kp_eff_lab, Ki_eff_lab, Kd_eff_lab] = ...
+    lab_position_to_shifted_pid(P_in, I_in, D_in, Ts, G_digital);
 
-fprintf('\nEffective PID from Lab Position values:\n');
+fprintf('\nUser-entered lab positions:\n');
 fprintf('  Position[0] (P) = %d\n', P_in);
 fprintf('  Position[1] (I) = %d\n', I_in);
 fprintf('  Position[2] (D) = %d\n', D_in);
+
+fprintf('\nCorresponding RTL coefficients:\n');
+fprintf('  K1 = %d\n', K1_in);
+fprintf('  K2 = %d\n', K2_in);
+fprintf('  K3 = %d\n', K3_in);
+
+fprintf('\nEffective controller PID from user-entered lab positions (Ts-based, after >>6):\n');
 fprintf('  Kp_eff = %.6f\n', Kp_eff_lab);
 fprintf('  Ki_eff = %.6e\n', Ki_eff_lab);
 fprintf('  Kd_eff = %.6e\n', Kd_eff_lab);
@@ -383,18 +423,6 @@ function [K1_out, K2_out, K3_out] = pid_to_k123(Kp, Ki, Kd, Ts)
     K1_out = Kp + Ki*Ts + Kd/Ts;
     K2_out = -Kp - 2*Kd/Ts;
     K3_out = Kd/Ts;
-end
-
-function [P_out, I_out, D_out] = k123_to_lab_position(K1, K2, K3)
-    D_out = K3;
-    P_out = -K2 - 2*K3;
-    I_out = K1 + K2 + K3;
-end
-
-function [K1_out, K2_out, K3_out] = lab_position_to_k123(P_in, I_in, D_in)
-    K1_out = P_in + I_in + D_in;
-    K2_out = -P_in - 2*D_in;
-    K3_out = D_in;
 end
 
 function [Kp_prog, Ki_prog, Kd_prog] = lab_position_to_pid(P_in, I_in, D_in, Ts)
@@ -433,4 +461,237 @@ function force_bode_phase_ylim(figHandle, phase_ylim)
             end
         end
     end
+end
+
+function apply_binary_yaxis(ax, nbits)
+    ylims = ylim(ax);
+    y1 = ceil(ylims(1));
+    y2 = floor(ylims(2));
+
+    if y1 == y2
+        ticks = y1;
+    else
+        ticks = unique(round(linspace(y1, y2, 7)));
+    end
+
+    labels = cell(size(ticks));
+    for i = 1:numel(ticks)
+        labels{i} = signed_code_to_bin(ticks(i), nbits);
+    end
+
+    set(ax, 'YTick', ticks, 'YTickLabel', labels);
+end
+
+function b = signed_code_to_bin(val, nbits)
+    modval = mod(round(val), 2^nbits);
+    b = dec2bin(modval, nbits);
+end
+
+%% ==================== LARGE-SIGNAL PREDICTOR ====================
+if RUN_LARGE_SIGNAL_PREDICTOR
+    ls_cfg = struct;
+    ls_cfg.Ts = Ts;           % keep K1/K2/K3 normalization on switching period
+    ls_cfg.Tctrl = Tctrl;     % PID control-output refresh rate = 256 MHz
+    ls_cfg.tstop = LARGE_SIGNAL_TSTOP;
+
+    ls_cfg.VOUT_NOM = VOUT;
+    ls_cfg.VOUT_INIT = LARGE_SIGNAL_VOUT_INIT;
+    ls_cfg.beta = beta;
+    ls_cfg.VREF_FB = beta * Vref;
+
+    ls_cfg.K1 = K1;
+    ls_cfg.K2 = K2;
+    ls_cfg.K3 = K3;
+    ls_cfg.SHIFT_BITS = SHIFT_BITS;
+    ls_cfg.PID_OUT_BITS = PID_OUT_BITS;
+    ls_cfg.PID_OUT_OFFSET = PID_OUT_OFFSET;
+    ls_cfg.PID_PRECLAMP_MIN = PID_PRECLAMP_MIN;
+    ls_cfg.PID_PRECLAMP_MAX = PID_PRECLAMP_MAX;
+
+    ls_cfg.N_ADC = N_ADC;
+    ls_cfg.VADC_MIN = VADC_MIN;
+    ls_cfg.VADC_MAX = VADC_MAX;
+
+    ls_cfg.N_DAC = N_DAC;
+    ls_cfg.V_FS_DAC = V_FS_DAC;
+    ls_cfg.wp_dac = wp_dac;
+    ls_cfg.DAC_OUT_MIN = DAC_OUT_MIN;
+    ls_cfg.DAC_OUT_MAX = DAC_OUT_MAX;
+
+    ls_cfg.use_quantized_adc_dac = USE_QUANTIZED_ADC_DAC;
+    ls_cfg.use_preclamp_state = USE_PRECLAMP_STATE;
+
+    [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predictor(Gvc, ls_cfg);
+
+    fprintf('\n===== LARGE-SIGNAL PREDICTOR =====\n');
+    fprintf('  K1/K2/K3 normalization Ts: %.3f ns\n', ls_cfg.Ts*1e9);
+    fprintf('  PID output refresh Tctrl:  %.3f ns (%.1f MHz)\n', ls_cfg.Tctrl*1e9, 1/ls_cfg.Tctrl/1e6);
+    fprintf('  Initial Vout:      %.4f V\n', LARGE_SIGNAL_VOUT_INIT);
+    fprintf('  Final Vout:        %.4f V\n', vout(end));
+    fprintf('  Peak Vout:         %.4f V\n', max(vout));
+    fprintf('  Min Vout:          %.4f V\n', min(vout));
+    fprintf('  Peak error signal: %.1f\n', max(abs(e_hist)));
+    fprintf('  Peak PID code:     %.1f\n', max(abs(pid_hist - PID_OUT_OFFSET)));
+    fprintf('  DAC output range:  %.4f V to %.4f V\n', min(vdac_hist), max(vdac_hist));
+
+    if PLOT_LARGE_SIGNAL_GRAPHS
+        figure;
+        subplot(5,1,1);
+        plot(t*1e6, vout, 'LineWidth', 1.2);
+        grid on;
+        ylabel('Vout (V)');
+        title('Large-Signal Predictor');
+
+        subplot(5,1,2);
+        plot(t*1e6, e_hist, 'LineWidth', 1.2);
+        grid on;
+        ylabel('Error');
+
+        subplot(5,1,3);
+        plot(t*1e6, u_hist, 'LineWidth', 1.2);
+        grid on;
+        ylabel('u state');
+
+        subplot(5,1,4);
+        plot(t*1e6, pid_hist, 'LineWidth', 1.2);
+        grid on;
+        ylabel('PID code');
+        if PLOT_BINARY_CODE_AXIS
+            apply_binary_yaxis(gca, PID_OUT_BITS);
+        end
+
+        subplot(5,1,5);
+        plot(t*1e6, vdac_hist, 'LineWidth', 1.2);
+        grid on;
+        xlabel('Time (\mus)');
+        ylabel('DAC out (V)');
+        if PLOT_BINARY_CODE_AXIS
+            apply_binary_yaxis(gca, N_DAC);
+        end
+    end
+end
+
+function [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predictor(Gvc, cfg)
+    sysd = c2d(ss(minreal(Gvc)), cfg.Tctrl, 'zoh');
+    [Ad, Bd, Cd, Dd] = ssdata(sysd);
+
+    N  = floor(cfg.tstop / cfg.Tctrl) + 1;
+    nx = size(Ad, 1);
+
+    t = (0:N-1) * cfg.Tctrl;
+    vout = zeros(1, N);
+    e_hist = zeros(1, N);
+    u_hist = zeros(1, N);
+    pid_hist = zeros(1, N);
+    vdac_hist = zeros(1, N);
+
+    dv0 = cfg.VOUT_INIT - cfg.VOUT_NOM;
+    x = zeros(nx, 1);
+    if ~isempty(Cd)
+        x = pinv(Cd) * dv0;
+    end
+
+    e1 = 0;
+    e2 = 0;
+    u_state = 0;
+
+    pid_code_min = 0;
+    pid_code_max = 2^(cfg.PID_OUT_BITS) - 1;
+    pid_offset   = cfg.PID_OUT_OFFSET;
+
+    pid_delta_min = -pid_offset;
+    pid_delta_max = pid_code_max - pid_offset;
+
+    u_min = cfg.PID_PRECLAMP_MIN;
+    u_max = cfg.PID_PRECLAMP_MAX;
+
+    dac_code_min = 0;
+    dac_code_max = 2^(cfg.N_DAC) - 1;
+    dac_offset   = 2^(cfg.N_DAC-1);
+
+    % 500 kHz analog DAC filter, discretized at Tctrl
+    a_dac = exp(-cfg.wp_dac * cfg.Tctrl);
+    b_dac = 1 - a_dac;
+
+    % Midscale analog output for zero small-signal injection
+    v_dac_mid = cfg.DAC_OUT_MIN + ...
+        (dac_offset / dac_code_max) * (cfg.DAC_OUT_MAX - cfg.DAC_OUT_MIN);
+    v_dac_mid = min(max(v_dac_mid, cfg.DAC_OUT_MIN), cfg.DAC_OUT_MAX);
+
+    v_dac_filt = v_dac_mid;
+
+    for k = 1:N
+        dvout = Cd*x;
+        if ~isempty(Dd)
+            dvout = dvout + Dd*0;
+        end
+        dvout = double(dvout(1));
+        vout(k) = cfg.VOUT_NOM + dvout;
+
+        vfb = cfg.beta * vout(k);
+
+        if cfg.use_quantized_adc_dac
+            adc_code = quantize_adc_code(vfb, cfg.VADC_MIN, cfg.VADC_MAX, cfg.N_ADC);
+            ref_code = quantize_adc_code(cfg.VREF_FB, cfg.VADC_MIN, cfg.VADC_MAX, cfg.N_ADC);
+            e0 = double(ref_code - adc_code);
+        else
+            e0 = cfg.VREF_FB - vfb;
+        end
+
+        u_pre = u_state + cfg.K1*e0 + cfg.K2*e1 + cfg.K3*e2;
+        u_sat = min(max(u_pre, u_min), u_max);
+
+        u_state = u_sat;
+
+        pid_delta = round(u_sat / 2^(cfg.SHIFT_BITS));
+        pid_delta = min(max(pid_delta, pid_delta_min), pid_delta_max);
+
+        pid_code = pid_delta + pid_offset;
+        pid_code = min(max(pid_code, pid_code_min), pid_code_max);
+
+        % Unsigned sigma-delta / DAC code
+        dac_delta = pid_code - pid_offset;
+        dac_code  = dac_delta + dac_offset;
+        dac_code  = min(max(dac_code, dac_code_min), dac_code_max);
+
+        % Convert DAC code to analog voltage, NMOS-limited top end
+        v_dac_cmd = cfg.DAC_OUT_MIN + ...
+            (dac_code / dac_code_max) * (cfg.DAC_OUT_MAX - cfg.DAC_OUT_MIN);
+        v_dac_cmd = min(max(v_dac_cmd, cfg.DAC_OUT_MIN), cfg.DAC_OUT_MAX);
+
+        % Apply 500 kHz analog DAC filter
+        v_dac_filt = a_dac * v_dac_filt + b_dac * v_dac_cmd;
+
+        % Small-signal plant input is deviation from midscale analog DAC output
+        u_plant = v_dac_filt - v_dac_mid;
+
+        x = Ad*x + Bd*u_plant;
+
+        e_hist(k) = e0;
+        u_hist(k) = u_sat;
+        pid_hist(k) = pid_code;
+        vdac_hist(k) = v_dac_filt;
+
+        e2 = e1;
+        e1 = e0;
+    end
+end
+
+function code = quantize_adc_code(vin, vmin, vmax, nbits)
+    code_max = 2^nbits - 1;
+    vin_clip = min(max(vin, vmin), vmax);
+    code = round((vin_clip - vmin) / (vmax - vmin) * code_max);
+    code = min(max(code, 0), code_max);
+end
+
+function [P_out, I_out, D_out] = k123_to_lab_position(K1, K2, K3)
+    D_out = K3;
+    P_out = -K2 - 2*K3;
+    I_out = K1 + K2 + K3;
+end
+
+function [K1_out, K2_out, K3_out] = lab_position_to_k123(P_in, I_in, D_in)
+    K1_out = P_in + I_in + D_in;
+    K2_out = -P_in - 2*D_in;
+    K3_out = D_in;
 end
