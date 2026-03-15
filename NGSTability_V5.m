@@ -76,7 +76,7 @@ mc    = 1 + se/sn;
 %% ==================== OUTPUT FILTER ====================
 R    = 400e-3;
 C    = 22e-6;
-Resr = 10e-3;
+Resr = 3e-3;
 
 %% ==================== PCM PLANT PARAMETERS ====================
 wp = 1/(C*R) + (Ts*(mc*D_tag - 0.5)/(Lind*C));
@@ -133,11 +133,10 @@ fprintf('  G_total   = %.6e\n', G_total);
 %% ==================== TARGET CONTROLLER PID GAINS ====================
 % These are the desired controller gains after RTL >>6 only.
 % ADC and DAC stay as separate transfer-function gains in Hdig.
-Kp_target = 23.437500;
-Ki_target = 1.875000e+05;
-Kd_target = 1.171875e-07;
+Kp_target = 23.43;
+Ki_target = 8e+06;
+Kd_target =  2.7e-09;
   
-
 % Programmed gains before RTL >>6
 Kp_prog = Kp_target / G_digital;
 Ki_prog = Ki_target / G_digital;
@@ -145,8 +144,8 @@ Kd_prog = Kd_target / G_digital;
 
 % Convert desired programmed PID into lab-style discrete P/I/D positions
 P_real = Kp_prog;
-I_real = Ki_prog * Ts;
-D_real = Kd_prog / Ts;
+I_real = Ki_prog * Tctrl;
+D_real = Kd_prog / Tctrl;
 
 % Quantize at the position level, since this is what is effectively programmed
 P_cmd = round(P_real);
@@ -157,7 +156,7 @@ D_cmd = round(D_real);
 [K1, K2, K3] = lab_position_to_k123(P_cmd, I_cmd, D_cmd);
 
 % Recover actual programmed PID gains from the quantized positions
-[Kp_prog_q, Ki_prog_q, Kd_prog_q] = lab_position_to_pid(P_cmd, I_cmd, D_cmd, Ts);
+[Kp_prog_q, Ki_prog_q, Kd_prog_q] = lab_position_to_pid(P_cmd, I_cmd, D_cmd, Tctrl);
 
 % Effective controller gains after RTL >>6 only
 Kp_ctrl_eff = Kp_prog_q * G_digital;
@@ -242,7 +241,7 @@ switch lower(CONTROLLER_DOMAIN)
 
     case 'z'
         % Exact RTL controller in z-domain
-        Cz = tf([K1 K2 K3], [1 -1], Ts, 'Variable', 'z^-1');
+        Cz = tf([K1 K2 K3], [1 -1], Tctrl, 'Variable', 'z^-1');
 
         % Convert only for plotting/continuous loop combination
         Hpid = d2c(G_digital * Cz, 'tustin');
@@ -366,7 +365,7 @@ fprintf('4. For AMS load-step correlation, a nonlinear cycle-by-cycle model is s
 %% ==================== LAB POSITION REPORT ====================
 [P_lab, I_lab, D_lab] = k123_to_lab_position(K1, K2, K3);
 [Kp_eff_from_rtl, Ki_eff_from_rtl, Kd_eff_from_rtl] = ...
-    lab_position_to_shifted_pid(P_lab, I_lab, D_lab, Ts, G_digital);
+    lab_position_to_shifted_pid(P_lab, I_lab, D_lab, Tctrl, G_digital);
 
 fprintf('\n===== LAB POSITION REPORT =====\n');
 fprintf('From current RTL coefficients:\n');
@@ -379,7 +378,7 @@ fprintf('  Position[0] (P) = %d\n', round(P_lab));
 fprintf('  Position[1] (I) = %d\n', round(I_lab));
 fprintf('  Position[2] (D) = %d\n', round(D_lab));
 
-fprintf('\nEffective controller PID from recovered lab positions (Ts-based, after >>6):\n');
+fprintf('\nEffective controller PID from recovered lab positions (Tctrl-based, after >>6):\n');
 fprintf('  Kp_eff = %.6f\n', Kp_eff_from_rtl);
 fprintf('  Ki_eff = %.6e\n', Ki_eff_from_rtl);
 fprintf('  Kd_eff = %.6e\n', Kd_eff_from_rtl);
@@ -394,7 +393,7 @@ D_in = 45;
 
 [K1_in, K2_in, K3_in] = lab_position_to_k123(P_in, I_in, D_in);
 [Kp_eff_lab, Ki_eff_lab, Kd_eff_lab] = ...
-    lab_position_to_shifted_pid(P_in, I_in, D_in, Ts, G_digital);
+    lab_position_to_shifted_pid(P_in, I_in, D_in, Tctrl, G_digital);
 
 fprintf('\nUser-entered lab positions:\n');
 fprintf('  Position[0] (P) = %d\n', P_in);
@@ -406,7 +405,7 @@ fprintf('  K1 = %d\n', K1_in);
 fprintf('  K2 = %d\n', K2_in);
 fprintf('  K3 = %d\n', K3_in);
 
-fprintf('\nEffective controller PID from user-entered lab positions (Ts-based, after >>6):\n');
+fprintf('\nEffective controller PID from user-entered lab positions (Tctrl-based, after >>6):\n');
 fprintf('  Kp_eff = %.6f\n', Kp_eff_lab);
 fprintf('  Ki_eff = %.6e\n', Ki_eff_lab);
 fprintf('  Kd_eff = %.6e\n', Kd_eff_lab);
@@ -490,7 +489,7 @@ end
 %% ==================== LARGE-SIGNAL PREDICTOR ====================
 if RUN_LARGE_SIGNAL_PREDICTOR
     ls_cfg = struct;
-    ls_cfg.Ts = Ts;           % keep K1/K2/K3 normalization on switching period
+    ls_cfg.Ts = Tctrl;           % keep K1/K2/K3 normalization on switching period
     ls_cfg.Tctrl = Tctrl;     % PID control-output refresh rate = 256 MHz
     ls_cfg.tstop = LARGE_SIGNAL_TSTOP;
 
