@@ -1,5 +1,5 @@
-% filepath: c:\Users\yalwilly\OneDrive - Intel Corporation\Documents\yazn\work\Next Gen DC2DC\PCM Modeling\PCMModeling\PCMModeling\NGSTability_V5.m
-%% ====== NGSTability_V5.m ======
+% filepath: c:\Users\yalwilly\OneDrive - Intel Corporation\Documents\yazn\work\Next Gen DC2DC\PCM Modeling\PCMModeling\PCMModeling\NGSTability_V6.m
+%% ====== NGSTability_V6.m ======
 % PCM Buck Converter Stability Analysis
 % Cleaned model:
 % - ADC gain = 1
@@ -12,8 +12,8 @@ clear; close all; clc;
 s = tf('s');
 
 PLOT_BODE_GRAPHS = false;
-PLOT_SMALL_SIGNAL_GRAPHS = true;
-PLOT_LARGE_SIGNAL_GRAPHS = true;
+PLOT_SMALL_SIGNAL_GRAPHS = false;
+PLOT_LARGE_SIGNAL_GRAPHS = false;
 CONTROLLER_DOMAIN = 'z';       % 'laplace' or 'z'
 USE_SMALL_SIGNAL_ADC_DAC = false;
 PHASE_YLIM = [-270 90];
@@ -134,9 +134,9 @@ fprintf('  G_total   = %.6e\n', G_total);
 %% ==================== TARGET CONTROLLER PID GAINS ====================
 % These are the desired controller gains after RTL >>6 only.
 % ADC and DAC stay as separate transfer-function gains in Hdig.
-Kp_target = 60;
-Ki_target = 30e+06;
-Kd_target =  6.24e-08;
+Kp_target = 23.15;
+Ki_target = 4e+06;
+Kd_target = 6.24e-08;
   
 % Programmed gains before RTL >>6
 Kp_prog = Kp_target / G_digital;
@@ -204,7 +204,35 @@ wp_dac  = 2*pi*500e3;
 Td      = 4e-9;
 Td_ADC  = 5e-9;
 Tblank  = 32e-9;
+%% ==================== SIMPLE PID OPTIMIZATION SETTINGS ====================
+RUN_SIMPLE_PID_OPT = true;      % suggestion only, does not overwrite active gains
+SIMPLE_OPT_VERBOSE = true;
 
+% Robust multi-load optimization corners
+OPT_I_LOAD_VEC = [0.001 0.10 0.30 0.50 0.70 0.90 1.10 2 3];   % A
+
+% Hard stability requirements for every load corner
+OPT_MIN_PM_DEG = 30;
+OPT_MIN_GM_DB  = 6;
+
+% Objective weights
+OPT_W_PM_MIN   = 1.00;          % maximize worst-case PM
+OPT_W_GM_MIN   = 0.80;          % maximize worst-case GM
+OPT_W_PM_AVG   = 0.15;          % slight preference for good average PM
+OPT_W_GM_AVG   = 0.10;          % slight preference for good average GM
+OPT_W_FC       = 20;          % penalize crossover moving away from fc
+OPT_W_SPREAD   = 0.20;          % penalize load sensitivity
+
+OPT_PM_CAP     = 85;
+OPT_GM_CAP_DB  = 40;
+OPT_MAX_ITER   = 150;
+
+OPT_KP_MIN = 0.015625;
+OPT_KP_MAX = 2e2;
+OPT_KI_MIN = 4e8;
+OPT_KI_MAX = 5e8;
+OPT_KD_MIN = 6.103516e-11;
+OPT_KD_MAX = 6.250000e-08;
 %% ==================== STABILITY CHECKS ====================
 if Alpha < 1
     disp('Alpha is less than 1 - the FB loop is stable');
@@ -388,9 +416,9 @@ fprintf('\nProgramming line using lab positions:\n');
 fprintf('  ChipTC.FullChip.Power.SetPIDCofficients(1, %d, %d, %d);\n', ...
     round(P_lab), round(I_lab), round(D_lab));
 
-P_in = 1500;
-I_in = 2;
-D_in = 45;
+P_in = 1;
+I_in = 1;
+D_in = 1024;
 
 [K1_in, K2_in, K3_in] = lab_position_to_k123(P_in, I_in, D_in);
 [Kp_eff_lab, Ki_eff_lab, Kd_eff_lab] = ...
@@ -694,4 +722,290 @@ function [K1_out, K2_out, K3_out] = lab_position_to_k123(P_in, I_in, D_in)
     K1_out = P_in + I_in + D_in;
     K2_out = -P_in - 2*D_in;
     K3_out = D_in;
+end
+
+%% ==================== SIMPLE PID OPTIMIZATION ====================
+if RUN_SIMPLE_PID_OPT
+    opt_cfg = struct;
+    opt_cfg.Kp0 = Kp_target;
+    opt_cfg.Ki0 = Ki_target;
+    opt_cfg.Kd0 = Kd_target;
+
+    opt_cfg.Tctrl = Tctrl;
+    opt_cfg.Ts = Ts;
+    opt_cfg.Tf = Tf;
+    opt_cfg.fc = fc;
+
+    opt_cfg.G_digital = G_digital;
+    opt_cfg.G_ADC = G_ADC;
+    opt_cfg.G_DAC = G_DAC;
+
+    opt_cfg.H = H;
+    opt_cfg.Hadc = Hadc;
+    opt_cfg.Hdac = Hdac;
+    opt_cfg.Hblank = Hblank;
+    opt_cfg.Delay = Delay;
+    opt_cfg.controller_domain = CONTROLLER_DOMAIN;
+
+    % Plant/build parameters for load sweep
+    opt_cfg.VOUT = VOUT;
+    opt_cfg.Lind = Lind;
+    opt_cfg.C = C;
+    opt_cfg.Resr = Resr;
+    opt_cfg.Ri = Ri;
+    opt_cfg.mc = mc;
+    opt_cfg.D_tag = D_tag;
+
+    % Multi-load settings
+    opt_cfg.Iload_vec = OPT_I_LOAD_VEC;
+    opt_cfg.OPT_MIN_PM_DEG = OPT_MIN_PM_DEG;
+    opt_cfg.OPT_MIN_GM_DB = OPT_MIN_GM_DB;
+
+    opt_cfg.OPT_W_PM_MIN = OPT_W_PM_MIN;
+    opt_cfg.OPT_W_GM_MIN = OPT_W_GM_MIN;
+    opt_cfg.OPT_W_PM_AVG = OPT_W_PM_AVG;
+    opt_cfg.OPT_W_GM_AVG = OPT_W_GM_AVG;
+    opt_cfg.OPT_W_FC = OPT_W_FC;
+    opt_cfg.OPT_W_SPREAD = OPT_W_SPREAD;
+
+    opt_cfg.OPT_PM_CAP = OPT_PM_CAP;
+    opt_cfg.OPT_GM_CAP_DB = OPT_GM_CAP_DB;
+    opt_cfg.OPT_MAX_ITER = OPT_MAX_ITER;
+
+    opt_cfg.OPT_KP_MIN = OPT_KP_MIN;
+    opt_cfg.OPT_KP_MAX = OPT_KP_MAX;
+    opt_cfg.OPT_KI_MIN = OPT_KI_MIN;
+    opt_cfg.OPT_KI_MAX = OPT_KI_MAX;
+    opt_cfg.OPT_KD_MIN = OPT_KD_MIN;
+    opt_cfg.OPT_KD_MAX = OPT_KD_MAX;
+
+    opt_cfg.SIMPLE_OPT_VERBOSE = SIMPLE_OPT_VERBOSE;
+
+    opt_result = simple_optimize_pid(opt_cfg);
+
+    fprintf('\n===== ROBUST MULTI-ILOAD PID OPTIMIZATION RESULT =====\n');
+    fprintf('Suggested targets:\n');
+    fprintf('  Kp_target = %.6g\n', opt_result.Kp_target);
+    fprintf('  Ki_target = %.6g\n', opt_result.Ki_target);
+    fprintf('  Kd_target = %.6g\n', opt_result.Kd_target);
+
+    fprintf('\nSuggested lab positions:\n');
+    fprintf('  P = %d\n', opt_result.P_cmd);
+    fprintf('  I = %d\n', opt_result.I_cmd);
+    fprintf('  D = %d\n', opt_result.D_cmd);
+
+    fprintf('\nSuggested RTL coefficients:\n');
+    fprintf('  K1 = %d\n', opt_result.K1);
+    fprintf('  K2 = %d\n', opt_result.K2);
+    fprintf('  K3 = %d\n', opt_result.K3);
+
+    fprintf('\nWorst-case margins across Iload sweep:\n');
+    fprintf('  Gain Margin:  %.2f dB\n', opt_result.Gm_dB_min);
+    fprintf('  Phase Margin: %.2f deg\n', opt_result.Pm_deg_min);
+
+    fprintf('\nAverage margins across Iload sweep:\n');
+    fprintf('  Gain Margin:  %.2f dB\n', opt_result.Gm_dB_avg);
+    fprintf('  Phase Margin: %.2f deg\n', opt_result.Pm_deg_avg);
+
+    fprintf('\nPer-load summary:\n');
+    for ii = 1:numel(opt_result.Iload_vec)
+        fprintf('  Iload = %.3f A  |  GM = %6.2f dB  PM = %6.2f deg  Fc = %8.2f kHz\n', ...
+            opt_result.Iload_vec(ii), opt_result.Gm_dB_vec(ii), ...
+            opt_result.Pm_deg_vec(ii), opt_result.Fc_kHz_vec(ii));
+    end
+
+    fprintf('\nProgramming line:\n');
+    fprintf('  ChipTC.FullChip.Power.SetPIDCofficients(1, %d, %d, %d);\n', ...
+        opt_result.P_cmd, opt_result.I_cmd, opt_result.D_cmd);
+end
+
+function result = simple_optimize_pid(cfg)
+    x0 = log10([cfg.Kp0, cfg.Ki0, max(cfg.Kd0, cfg.OPT_KD_MIN)]);
+
+    opts = optimset( ...
+        'Display', ternary(cfg.SIMPLE_OPT_VERBOSE, 'iter', 'off'), ...
+        'MaxIter', cfg.OPT_MAX_ITER, ...
+        'MaxFunEvals', 8*cfg.OPT_MAX_ITER, ...
+        'TolX', 1e-3, ...
+        'TolFun', 1e-3);
+
+    xbest = fminsearch(@(x) pid_margin_cost_multiload(x, cfg), x0, opts);
+    result = evaluate_pid_candidate_multiload(10.^xbest, cfg);
+end
+
+function cost = pid_margin_cost_multiload(xlog, cfg)
+    vals = 10.^xlog;
+    rep = evaluate_pid_candidate_multiload(vals, cfg);
+
+    overflow_pen = 0;
+    if abs(rep.K1) > 2^19-1, overflow_pen = overflow_pen + 200; end
+    if abs(rep.K2) > 2^19-1, overflow_pen = overflow_pen + 200; end
+    if abs(rep.K3) > 2^10-1, overflow_pen = overflow_pen + 200; end
+
+    if ~rep.valid
+        cost = 1e6 + overflow_pen;
+        return;
+    end
+
+    pm_min_use = min(rep.Pm_deg_min, cfg.OPT_PM_CAP);
+    gm_min_use = min(rep.Gm_dB_min, cfg.OPT_GM_CAP_DB);
+    pm_avg_use = min(rep.Pm_deg_avg, cfg.OPT_PM_CAP);
+    gm_avg_use = min(rep.Gm_dB_avg, cfg.OPT_GM_CAP_DB);
+
+    fc_pen = mean(abs(log10(max(rep.Wcp_rad_vec, 1) / (2*pi*cfg.fc))));
+    spread_pen = std(rep.Pm_deg_vec) + 0.5*std(rep.Gm_dB_vec);
+
+    score = cfg.OPT_W_PM_MIN * pm_min_use + ...
+            cfg.OPT_W_GM_MIN * gm_min_use + ...
+            cfg.OPT_W_PM_AVG * pm_avg_use + ...
+            cfg.OPT_W_GM_AVG * gm_avg_use - ...
+            cfg.OPT_W_FC * fc_pen - ...
+            cfg.OPT_W_SPREAD * spread_pen;
+
+    cost = -score + overflow_pen;
+end
+
+function rep = evaluate_pid_candidate_multiload(pid_vals, cfg)
+    s = tf('s');
+
+    Kp_target = pid_vals(1);
+    Ki_target = pid_vals(2);
+    Kd_target = pid_vals(3);
+
+    valid = true;
+
+    if Kp_target < cfg.OPT_KP_MIN || Kp_target > cfg.OPT_KP_MAX, valid = false; end
+    if Ki_target < cfg.OPT_KI_MIN || Ki_target > cfg.OPT_KI_MAX, valid = false; end
+    if Kd_target < cfg.OPT_KD_MIN || Kd_target > cfg.OPT_KD_MAX, valid = false; end
+
+    Kp_prog = Kp_target / cfg.G_digital;
+    Ki_prog = Ki_target / cfg.G_digital;
+    Kd_prog = Kd_target / cfg.G_digital;
+
+    P_real = Kp_prog;
+    I_real = Ki_prog * cfg.Tctrl;
+    D_real = Kd_prog / cfg.Tctrl;
+
+    P_cmd = round(P_real);
+    I_cmd = round(I_real);
+    D_cmd = round(D_real);
+
+    [K1, K2, K3] = lab_position_to_k123(P_cmd, I_cmd, D_cmd);
+    [Kp_prog_q, Ki_prog_q, Kd_prog_q] = lab_position_to_pid(P_cmd, I_cmd, D_cmd, cfg.Tctrl);
+
+    switch lower(cfg.controller_domain)
+        case 'laplace'
+            Hpid = Kp_prog_q + Ki_prog_q/s + (Kd_prog_q*s)/(cfg.Tf*s + 1);
+            Hdig = minreal(cfg.G_ADC * cfg.Hadc * Hpid * cfg.G_digital * cfg.G_DAC * cfg.Hdac * cfg.Hblank * cfg.Delay);
+
+        case 'z'
+            Cz = tf([K1 K2 K3], [1 -1], cfg.Tctrl, 'Variable', 'z^-1');
+            Hpid = d2c(cfg.G_digital * Cz, 'tustin');
+            Hdig = minreal(cfg.G_ADC * cfg.Hadc * Hpid * cfg.G_DAC * cfg.Hdac * cfg.Hblank * cfg.Delay);
+
+        otherwise
+            error('Unsupported controller domain.');
+    end
+
+    nL = numel(cfg.Iload_vec);
+    Gm_dB_vec = zeros(1, nL);
+    Pm_deg_vec = zeros(1, nL);
+    Wcp_rad_vec = zeros(1, nL);
+    Fc_kHz_vec = zeros(1, nL);
+
+    for ii = 1:nL
+        Gvc_i = build_pcm_plant_at_iload(cfg, cfg.Iload_vec(ii));
+        Lloop_i = Hdig * Gvc_i * cfg.H;
+
+        [Gm, Pm, ~, Wcp] = margin(Lloop_i);
+
+        if isempty(Gm) || isempty(Pm) || isempty(Wcp) || isnan(Pm) || isnan(Wcp) || Wcp <= 0
+            valid = false;
+            Gm_dB_vec(ii) = -Inf;
+            Pm_deg_vec(ii) = -Inf;
+            Wcp_rad_vec(ii) = NaN;
+            Fc_kHz_vec(ii) = NaN;
+            continue;
+        end
+
+        if isinf(Gm)
+            Gm_dB = cfg.OPT_GM_CAP_DB;
+        else
+            Gm_dB = 20*log10(max(Gm, eps));
+        end
+
+        Gm_dB_vec(ii) = Gm_dB;
+        Pm_deg_vec(ii) = Pm;
+        Wcp_rad_vec(ii) = Wcp;
+        Fc_kHz_vec(ii) = Wcp / (2*pi*1e3);
+
+        if Pm < cfg.OPT_MIN_PM_DEG || Gm_dB < cfg.OPT_MIN_GM_DB
+            valid = false;
+        end
+    end
+
+    good_pm = Pm_deg_vec(isfinite(Pm_deg_vec));
+    good_gm = Gm_dB_vec(isfinite(Gm_dB_vec));
+
+    if isempty(good_pm) || isempty(good_gm)
+        valid = false;
+        Pm_deg_min = -Inf;
+        Gm_dB_min = -Inf;
+        Pm_deg_avg = -Inf;
+        Gm_dB_avg = -Inf;
+    else
+        Pm_deg_min = min(good_pm);
+        Gm_dB_min = min(good_gm);
+        Pm_deg_avg = mean(good_pm);
+        Gm_dB_avg = mean(good_gm);
+    end
+
+    rep = struct;
+    rep.valid = valid;
+
+    rep.Kp_target = Kp_target;
+    rep.Ki_target = Ki_target;
+    rep.Kd_target = Kd_target;
+
+    rep.P_cmd = P_cmd;
+    rep.I_cmd = I_cmd;
+    rep.D_cmd = D_cmd;
+
+    rep.K1 = K1;
+    rep.K2 = K2;
+    rep.K3 = K3;
+
+    rep.Iload_vec = cfg.Iload_vec;
+    rep.Gm_dB_vec = Gm_dB_vec;
+    rep.Pm_deg_vec = Pm_deg_vec;
+    rep.Wcp_rad_vec = Wcp_rad_vec;
+    rep.Fc_kHz_vec = Fc_kHz_vec;
+
+    rep.Gm_dB_min = Gm_dB_min;
+    rep.Pm_deg_min = Pm_deg_min;
+    rep.Gm_dB_avg = Gm_dB_avg;
+    rep.Pm_deg_avg = Pm_deg_avg;
+end
+
+function Gvc_i = build_pcm_plant_at_iload(cfg, Iload)
+    s = tf('s');
+
+    R = cfg.VOUT / Iload;
+    wp = 1/(cfg.C*R) + (cfg.Ts*(cfg.mc*cfg.D_tag - 0.5)/(cfg.Lind*cfg.C));
+    wn = pi/cfg.Ts;
+    Qp = 1/(pi*(cfg.mc*cfg.D_tag - 0.5));
+
+    Hdc = (R/cfg.Ri) * (1 / (1 + R*cfg.Ts*(cfg.mc*cfg.D_tag - 0.5)/cfg.Lind));
+    Fp = (1 + s*cfg.C*cfg.Resr) / (1 + s/wp);
+    Fh = 1 / (1 + s/(wn*Qp) + (s^2)/(wn^2));
+
+    Gvc_i = minreal(Hdc * Fp * Fh);
+end
+
+function out = ternary(cond, a, b)
+    if cond
+        out = a;
+    else
+        out = b;
+    end
 end
