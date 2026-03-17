@@ -11,9 +11,9 @@
 clear; close all; clc;
 s = tf('s');
 
-PLOT_BODE_GRAPHS = false;
-PLOT_SMALL_SIGNAL_GRAPHS = false;
-PLOT_LARGE_SIGNAL_GRAPHS = false;
+PLOT_BODE_GRAPHS = true;
+PLOT_SMALL_SIGNAL_GRAPHS = true;
+PLOT_LARGE_SIGNAL_GRAPHS = true;
 CONTROLLER_DOMAIN = 'z';       % 'laplace' or 'z'
 USE_SMALL_SIGNAL_ADC_DAC = false;
 PHASE_YLIM = [-270 90];
@@ -48,7 +48,7 @@ Vref = 0.8;
 
 fs   = 6e6;
 Ts   = 1/fs;
-fc   = fs/10;
+fc   = fs/2;
 Tf   = 1/(10*fc);
 fdig = 256e6;
 Tdig = 1/fdig;
@@ -134,8 +134,8 @@ fprintf('  G_total   = %.6e\n', G_total);
 %% ==================== TARGET CONTROLLER PID GAINS ====================
 % These are the desired controller gains after RTL >>6 only.
 % ADC and DAC stay as separate transfer-function gains in Hdig.
-Kp_target = 23.15;
-Ki_target = 4e+06;
+Kp_target = 40.8;
+Ki_target = 4.72e+06;
 Kd_target = 6.24e-08;
   
 % Programmed gains before RTL >>6
@@ -201,26 +201,26 @@ fprintf('  Kd_path_eff = %.6e\n', Kd_path_eff);
 
 %% ==================== DIGITAL BLOCK PARAMETERS ====================
 wp_dac  = 2*pi*500e3;
-Td      = 4e-9;
+Td      = 8e-9;
 Td_ADC  = 5e-9;
-Tblank  = 15e-9;
+Tblank  = 12e-9;
 %% ==================== SIMPLE PID OPTIMIZATION SETTINGS ====================
-RUN_SIMPLE_PID_OPT = true;      % suggestion only, does not overwrite active gains
-SIMPLE_OPT_VERBOSE = true;
+RUN_SIMPLE_PID_OPT = false;      % suggestion only, does not overwrite active gains
+SIMPLE_OPT_VERBOSE = false;
 
 % Robust multi-load optimization corners
-%OPT_I_LOAD_VEC = [0.001 0.10 0.30 0.50 0.70 0.90 1.10 2 3];   % A
-OPT_I_LOAD_VEC = [0.01 0.4];   % A
+OPT_I_LOAD_VEC = [0.001 0.10 0.30 0.50 0.70 0.90 1.10 2 3];   % A
+%OPT_I_LOAD_VEC = [0.01 0.4];   % A
 % Hard stability requirements for every load corner
-OPT_MIN_PM_DEG = 20;
-OPT_MIN_GM_DB  = 3;
+OPT_MIN_PM_DEG = 30;
+OPT_MIN_GM_DB  = 6;
 
 % Objective weights
-OPT_W_PM_MIN   = 0.15;          % maximize worst-case PM
-OPT_W_GM_MIN   = 0.1;          % maximize worst-case GM
+OPT_W_PM_MIN   = 0.5;          % maximize worst-case PM
+OPT_W_GM_MIN   = 0.4;          % maximize worst-case GM
 OPT_W_PM_AVG   = 0.15;          % slight preference for good average PM
 OPT_W_GM_AVG   = 0.10;          % slight preference for good average GM
-OPT_W_FC       = 80;          % penalize crossover moving away from fc
+OPT_W_FC       = 40;          % penalize crossover moving away from fc
 OPT_W_SPREAD   = 0.20;          % penalize load sensitivity
 
 OPT_PM_CAP     = 85;
@@ -228,8 +228,8 @@ OPT_GM_CAP_DB  = 40;
 OPT_MAX_ITER   = 150;
 
 OPT_KP_MIN = 0.015625;
-OPT_KP_MAX = 2e2;
-OPT_KI_MIN = 4e8;
+OPT_KP_MAX = 10e2;
+OPT_KI_MIN = 4e6;
 OPT_KI_MAX = 5e8;
 OPT_KD_MIN = 6.103516e-11;
 OPT_KD_MAX = 6.250000e-08;

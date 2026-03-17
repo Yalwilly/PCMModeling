@@ -14,7 +14,7 @@ s = tf('s');
 PLOT_BODE_GRAPHS = false;
 PLOT_SMALL_SIGNAL_GRAPHS = true;
 PLOT_LARGE_SIGNAL_GRAPHS = true;
-CONTROLLER_DOMAIN = 'z';       % 'laplace' or 'z'
+CONTROLLER_DOMAIN = 'laplace';       % 'laplace' or 'z'
 USE_SMALL_SIGNAL_ADC_DAC = false;
 PHASE_YLIM = [-270 90];
 
@@ -74,7 +74,7 @@ Alpha = (sf - se)/(sn + se);
 mc    = 1 + se/sn;
 
 %% ==================== OUTPUT FILTER ====================
-Iload= 700e-3;
+Iload= 400e-3;
 R=VOUT/Iload ;
 C    = 22e-6;
 Resr = 3e-3;
@@ -134,10 +134,10 @@ fprintf('  G_total   = %.6e\n', G_total);
 %% ==================== TARGET CONTROLLER PID GAINS ====================
 % These are the desired controller gains after RTL >>6 only.
 % ADC and DAC stay as separate transfer-function gains in Hdig.
-Kp_target = 60;
-Ki_target = 30e+06;
-Kd_target =  6.24e-08;
-  
+Kp_target = 153.256;
+Ki_target = 20e+06;
+Kd_target =  4.8e-08;
+
 % Programmed gains before RTL >>6
 Kp_prog = Kp_target / G_digital;
 Ki_prog = Ki_target / G_digital;
@@ -201,9 +201,9 @@ fprintf('  Kd_path_eff = %.6e\n', Kd_path_eff);
 
 %% ==================== DIGITAL BLOCK PARAMETERS ====================
 wp_dac  = 2*pi*500e3;
-Td      = 4e-9;
+Td      = 8e-9;
 Td_ADC  = 5e-9;
-Tblank  = 32e-9;
+Tblank  = 12e-9;
 
 %% ==================== STABILITY CHECKS ====================
 if Alpha < 1
@@ -541,6 +541,7 @@ if RUN_LARGE_SIGNAL_PREDICTOR
         grid on;
         ylabel('Vout (V)');
         title('Large-Signal Predictor');
+        ylim([0 0.9]);
 
         subplot(5,1,2);
         plot(t*1e6, e_hist, 'LineWidth', 1.2);
