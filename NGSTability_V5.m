@@ -11,7 +11,7 @@
 clear; close all; clc;
 s = tf('s');
 
-PLOT_BODE_GRAPHS = false;
+PLOT_BODE_GRAPHS = true;
 PLOT_SMALL_SIGNAL_GRAPHS = true;
 PLOT_LARGE_SIGNAL_GRAPHS = true;
 CONTROLLER_DOMAIN = 'laplace';       % 'laplace' or 'z'
@@ -57,7 +57,7 @@ Tctrl = Tdig;   % PID / RTL update period
 
 %% ==================== CURRENT SENSING ====================
 GI     = (1/640)*(10/64)*(1/4);
-Rsense = 8e3;
+Rsense = 4e3;
 Ri     = GI * Rsense;
 
 %% ==================== DUTY CYCLE ====================
@@ -74,7 +74,7 @@ Alpha = (sf - se)/(sn + se);
 mc    = 1 + se/sn;
 
 %% ==================== OUTPUT FILTER ====================
-Iload= 400e-3;
+Iload= 100e-3;
 R=VOUT/Iload ;
 C    = 22e-6;
 Resr = 3e-3;
@@ -134,9 +134,10 @@ fprintf('  G_total   = %.6e\n', G_total);
 %% ==================== TARGET CONTROLLER PID GAINS ====================
 % These are the desired controller gains after RTL >>6 only.
 % ADC and DAC stay as separate transfer-function gains in Hdig.
-Kp_target = 153.256;
-Ki_target = 20e+06;
-Kd_target =  4.8e-08;
+Kp_target = 18.3028;
+Ki_target = 7.01895e+06;
+Kd_target =  6.23528e-08;
+
 
 % Programmed gains before RTL >>6
 Kp_prog = Kp_target / G_digital;
@@ -388,9 +389,9 @@ fprintf('\nProgramming line using lab positions:\n');
 fprintf('  ChipTC.FullChip.Power.SetPIDCofficients(1, %d, %d, %d);\n', ...
     round(P_lab), round(I_lab), round(D_lab));
 
-P_in = 1500;
-I_in = 2;
-D_in = 45;
+P_in = 1;
+I_in = 1;
+D_in = 1;
 
 [K1_in, K2_in, K3_in] = lab_position_to_k123(P_in, I_in, D_in);
 [Kp_eff_lab, Ki_eff_lab, Kd_eff_lab] = ...
@@ -410,6 +411,20 @@ fprintf('\nEffective controller PID from user-entered lab positions (Tctrl-based
 fprintf('  Kp_eff = %.6f\n', Kp_eff_lab);
 fprintf('  Ki_eff = %.6e\n', Ki_eff_lab);
 fprintf('  Kd_eff = %.6e\n', Kd_eff_lab);
+
+K1=3008;
+K2=-3940;
+K3=936;
+
+[Kp_out, Ki_out, Kd_out] = k123_to_pid(K1, K2, K3, Tctrl);
+[Kp_eff, Ki_eff, Kd_eff] = lab_position_to_shifted_pid(P_in, I_in, D_in, Ts, G_digital)
+
+fprintf('\nEffective controller PID from K1,K2,K3 (Tctrl-based, after >>6):\n');
+fprintf('  Kp_eff = %.6f\n', Kp_eff);
+fprintf('  Ki_eff = %.6e\n', Ki_eff);
+fprintf('  Kd_eff = %.6e\n', Kd_eff);
+
+
 
 %% ---------------------------------------------------------- %%%
 
