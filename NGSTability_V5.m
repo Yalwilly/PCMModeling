@@ -21,8 +21,8 @@ PHASE_YLIM = [-270 90];
 SHIFT_BITS = 6;                % RTL >>6
 
 RUN_LARGE_SIGNAL_PREDICTOR = true;
-LARGE_SIGNAL_TSTOP = 100e-6;    % s
-LARGE_SIGNAL_VOUT_INIT = 0.2;   % V, initial output for predictor
+LARGE_SIGNAL_TSTOP = 300e-6;    % s
+LARGE_SIGNAL_VOUT_INIT = 0.7;   % V, initial output for predictor
 USE_QUANTIZED_ADC_DAC = true;   % exact ADC/DAC quantization in predictor
 USE_PRECLAMP_STATE = true;      % true matches RTL that stores pre-clamp state
 PID_OUT_BITS = 12;              % PID output width after >>6
@@ -79,6 +79,15 @@ R=VOUT/Iload ;
 C    = 22e-6;
 Resr = 3e-3;
 
+%% ==================== LARGE-SIGNAL LOAD STEP PROFILE ====================
+LOAD_STEP_ENABLE = true;
+LOAD_STEP_I0     = Iload;      % A, nominal load current
+LOAD_STEP_DI     = 1;        % A, load step magnitude
+LOAD_STEP_DELAY  = 150e-6;      % s, delay before step starts
+LOAD_STEP_RISE   = 100e-9;     % s, rising edge time
+LOAD_STEP_WIDTH  = inf;        % s, inf = one-way step
+LOAD_STEP_FALL   = 100e-9;     % s, falling edge time for finite pulse
+
 %% ==================== PCM PLANT PARAMETERS ====================
 wp = 1/(C*R) + (Ts*(mc*D_tag - 0.5)/(Lind*C));
 wn = pi/Ts;
@@ -131,80 +140,22 @@ fprintf('  G_DAC     = %.6e\n', G_DAC);
 fprintf('  G_adc_dac = %.6e\n', G_adc_dac);
 fprintf('  G_total   = %.6e\n', G_total);
 
-%% ==================== TARGET CONTROLLER PID GAINS ====================
-% These are the desired controller gains after RTL >>6 only.
-% ADC and DAC stay as separate transfer-function gains in Hdig.
-Kp_target = 18.3028;
-Ki_target = 7.01895e+06;
-Kd_target =  6.23528e-08;
-
-
-% Programmed gains before RTL >>6
-Kp_prog = Kp_target / G_digital;
-Ki_prog = Ki_target / G_digital;
-Kd_prog = Kd_target / G_digital;
-
-% Convert desired programmed PID into lab-style discrete P/I/D positions
-P_real = Kp_prog;
-I_real = Ki_prog * Tctrl;
-D_real = Kd_prog / Tctrl;
-
-% Quantize at the position level, since this is what is effectively programmed
-P_cmd = round(P_real);
-I_cmd = round(I_real);
-D_cmd = round(D_real);
-
-% Convert quantized positions to RTL coefficients
-[K1, K2, K3] = lab_position_to_k123(P_cmd, I_cmd, D_cmd);
-
-% Recover actual programmed PID gains from the quantized positions
-[Kp_prog_q, Ki_prog_q, Kd_prog_q] = lab_position_to_pid(P_cmd, I_cmd, D_cmd, Tctrl);
-
-% Effective controller gains after RTL >>6 only
-Kp_ctrl_eff = Kp_prog_q * G_digital;
-Ki_ctrl_eff = Ki_prog_q * G_digital;
-Kd_ctrl_eff = Kd_prog_q * G_digital;
-
-% Optional: total path-scaled values for reporting only
-Kp_path_eff = Kp_ctrl_eff * G_adc_dac;
-Ki_path_eff = Ki_ctrl_eff * G_adc_dac;
-Kd_path_eff = Kd_ctrl_eff * G_adc_dac;
-
-fprintf('\nIdeal lab positions before rounding:\n');
-fprintf('  P_real = %.6f\n', P_real);
-fprintf('  I_real = %.6f\n', I_real);
-fprintf('  D_real = %.6f\n', D_real);
-
-fprintf('\nQuantized lab positions:\n');
-fprintf('  Position[0] (P) = %d\n', P_cmd);
-fprintf('  Position[1] (I) = %d\n', I_cmd);
-fprintf('  Position[2] (D) = %d\n', D_cmd);
-
-fprintf('\nRTL coefficients from quantized positions:\n');
-fprintf('  K1 = %d   (20-bit max: 524287) -> %s\n', K1, regcheck(K1, 2^19-1));
-fprintf('  K2 = %d   (20-bit max: 524287) -> %s\n', K2, regcheck(K2, 2^19-1));
-fprintf('  K3 = %d   (11-bit max: 1023)   -> %s\n', K3, regcheck(K3, 2^10-1));
-
-fprintf('\nRecovered programmed gains from quantized K1/K2/K3:\n');
-fprintf('  Kp_prog_q = %.6f\n', Kp_prog_q);
-fprintf('  Ki_prog_q = %.6e\n', Ki_prog_q);
-fprintf('  Kd_prog_q = %.6e\n', Kd_prog_q);
-
-fprintf('\nEffective controller gains after >>6 only:\n');
-fprintf('  Kp_ctrl_eff = %.6f\n', Kp_ctrl_eff);
-fprintf('  Ki_ctrl_eff = %.6e\n', Ki_ctrl_eff);
-fprintf('  Kd_ctrl_eff = %.6e\n', Kd_ctrl_eff);
-
-fprintf('\nPath-scaled values after ADC/DAC/>>6 (report only):\n');
-fprintf('  Kp_path_eff = %.6e\n', Kp_path_eff);
-fprintf('  Ki_path_eff = %.6e\n', Ki_path_eff);
-fprintf('  Kd_path_eff = %.6e\n', Kd_path_eff);
+%% ==================== PID GAIN SETS (multi-set overlay) ====================
+% Each row: {Kp_target, Ki_target, Kd_target, 'Label'}
+% Add/remove rows to compare different gain configurations on the same plots.
+PID_GAIN_SETS = {
+    18.3028,    8e+06,       6.243896e-08, 'Set 1: Kp=18.3 Ki=8M';
+    32.312500,  1.600000e+07, 5.712891e-08, 'Set 2: Kp=32.3 Ki=16M';
+    50.515625,  2.000000e+07, 6.243896e-08, 'Set 3: Kp=50.5 Ki=20M';
+};
+LARGE_SIGNAL_SET_IDX = 1;  % which gain set to use for large-signal predictor
+N_SETS = size(PID_GAIN_SETS, 1);
 
 %% ==================== DIGITAL BLOCK PARAMETERS ====================
 wp_dac  = 2*pi*500e3;
 Td      = 8e-9;
 Td_ADC  = 5e-9;
-Tblank  = 12e-9;
+Tblank  = 20e-9;
 
 %% ==================== STABILITY CHECKS ====================
 if Alpha < 1
@@ -231,46 +182,109 @@ Hadc = tf(numADC, denADC);
 
 Hdac = 1 / (1 + s/wp_dac);
 
-switch lower(CONTROLLER_DOMAIN)
-    case 'laplace'
-        % Continuous PID using recovered programmed gains
-        Hpid = Kp_prog_q + Ki_prog_q/s + (Kd_prog_q*s)/(Tf*s + 1);
-
-        % Complete digital chain
-        Hdig = minreal(G_ADC * Hadc * Hpid * G_digital * G_DAC * Hdac * Hblank * Delay);
-        controller_title = 'Digital Controller in Laplace Domain';
-        controller_phase_name = 'RTL PID(Laplace)';
-
-    case 'z'
-        % Exact RTL controller in z-domain
-        Cz = tf([K1 K2 K3], [1 -1], Tctrl, 'Variable', 'z^-1');
-
-        % Convert only for plotting/continuous loop combination
-        Hpid = d2c(G_digital * Cz, 'tustin');
-
-        % G_digital already absorbed into Hpid
-        Hdig = minreal(G_ADC * Hadc * Hpid * G_DAC * Hdac * Hblank * Delay);
-        controller_title = 'Digital Controller from Z Domain';
-        controller_phase_name = 'RTL PID(Z)';
-
-    otherwise
-        error('CONTROLLER_DOMAIN must be ''laplace'' or ''z''.');
-end
-
-fprintf('\n===== CONTROLLER MODEL SELECTION =====\n');
-fprintf('  CONTROLLER_DOMAIN = %s\n', CONTROLLER_DOMAIN);
-
-%% ==================== PLANT & LOOP GAINS ====================
+%% ==================== PLANT (gain-independent) ====================
 Gvc   = minreal(Hdc * Fp * Fh);
-Lloop = Hdig * Gvc * H;
-Tloop = feedback(Lloop, 1);
+Zc = Resr + 1/(s*C);
+Rload_ls = VOUT / max(LOAD_STEP_I0, 1e-6);
+Zout_ol = minreal((Zc * Rload_ls) / (Zc + Rload_ls));
+Gload = minreal(-Zout_ol);   % dVout / dIload at the output node
 
 Lc = Hc * Gvc * H;
 Tc = feedback(Lc, 1);
-
-%% ==================== STABILITY MARGINS ====================
-[Gm_dig, Pm_dig, Wcg_dig, Wcp_dig] = margin(Lloop);
 [Gm_ana, Pm_ana, Wcg_ana, Wcp_ana] = margin(Lc);
+
+%% ==================== PROCESS ALL PID GAIN SETS ====================
+fprintf('\n===== CONTROLLER MODEL SELECTION =====\n');
+fprintf('  CONTROLLER_DOMAIN = %s\n', CONTROLLER_DOMAIN);
+
+Hpid_all   = cell(1, N_SETS);
+Hdig_all   = cell(1, N_SETS);
+Lloop_all  = cell(1, N_SETS);
+Tloop_all  = cell(1, N_SETS);
+K_all      = zeros(N_SETS, 3);   % K1, K2, K3
+P_cmd_all  = zeros(N_SETS, 3);   % P_cmd, I_cmd, D_cmd
+Pm_dig_all = zeros(1, N_SETS);
+Gm_dig_all = zeros(1, N_SETS);
+Wcg_dig_all = zeros(1, N_SETS);
+Wcp_dig_all = zeros(1, N_SETS);
+Kp_ctrl_eff_all = zeros(1, N_SETS);
+Ki_ctrl_eff_all = zeros(1, N_SETS);
+Kd_ctrl_eff_all = zeros(1, N_SETS);
+labels     = cell(1, N_SETS);
+
+for iset = 1:N_SETS
+    Kp_target = PID_GAIN_SETS{iset, 1};
+    Ki_target = PID_GAIN_SETS{iset, 2};
+    Kd_target = PID_GAIN_SETS{iset, 3};
+    labels{iset} = PID_GAIN_SETS{iset, 4};
+
+    % Programmed gains before RTL >>6
+    Kp_prog = Kp_target / G_digital;
+    Ki_prog = Ki_target / G_digital;
+    Kd_prog = Kd_target / G_digital;
+
+    % Lab-style discrete P/I/D positions
+    P_real = Kp_prog;
+    I_real = Ki_prog * Tctrl;
+    D_real = Kd_prog / Tctrl;
+
+    P_cmd = round(P_real);
+    I_cmd = round(I_real);
+    D_cmd = round(D_real);
+
+    [K1, K2, K3] = lab_position_to_k123(P_cmd, I_cmd, D_cmd);
+    [Kp_prog_q, Ki_prog_q, Kd_prog_q] = lab_position_to_pid(P_cmd, I_cmd, D_cmd, Tctrl);
+
+    Kp_ctrl_eff = Kp_prog_q * G_digital;
+    Ki_ctrl_eff = Ki_prog_q * G_digital;
+    Kd_ctrl_eff = Kd_prog_q * G_digital;
+
+    switch lower(CONTROLLER_DOMAIN)
+        case 'laplace'
+            Hpid_i = Kp_prog_q + Ki_prog_q/s + (Kd_prog_q*s)/(Tf*s + 1);
+            Hdig_i = minreal(G_ADC * Hadc * Hpid_i * G_digital * G_DAC * Hdac * Hblank * Delay);
+            controller_phase_name = 'RTL PID(Laplace)';
+        case 'z'
+            Cz_i = tf([K1 K2 K3], [1 -1], Tctrl, 'Variable', 'z^-1');
+            Hpid_i = d2c(G_digital * Cz_i, 'tustin');
+            Hdig_i = minreal(G_ADC * Hadc * Hpid_i * G_DAC * Hdac * Hblank * Delay);
+            controller_phase_name = 'RTL PID(Z)';
+        otherwise
+            error('CONTROLLER_DOMAIN must be ''laplace'' or ''z''.');
+    end
+
+    Lloop_i = Hdig_i * Gvc * H;
+    Tloop_i = feedback(Lloop_i, 1);
+
+    [Gm_i, Pm_i, Wcg_i, Wcp_i] = margin(Lloop_i);
+
+    % Store results
+    Hpid_all{iset}   = Hpid_i;
+    Hdig_all{iset}   = Hdig_i;
+    Lloop_all{iset}  = Lloop_i;
+    Tloop_all{iset}  = Tloop_i;
+    K_all(iset,:)    = [K1 K2 K3];
+    P_cmd_all(iset,:) = [P_cmd I_cmd D_cmd];
+    Pm_dig_all(iset) = Pm_i;
+    Gm_dig_all(iset) = Gm_i;
+    Wcg_dig_all(iset) = Wcg_i;
+    Wcp_dig_all(iset) = Wcp_i;
+    Kp_ctrl_eff_all(iset) = Kp_ctrl_eff;
+    Ki_ctrl_eff_all(iset) = Ki_ctrl_eff;
+    Kd_ctrl_eff_all(iset) = Kd_ctrl_eff;
+
+    fprintf('\n----- %s -----\n', labels{iset});
+    fprintf('  Kp=%.4f  Ki=%.4e  Kd=%.4e\n', Kp_target, Ki_target, Kd_target);
+    fprintf('  K1=%d  K2=%d  K3=%d\n', K1, K2, K3);
+    fprintf('  Gain Margin:  %.1f dB at %.1f kHz\n', 20*log10(Gm_i), Wcg_i/(2*pi*1e3));
+    fprintf('  Phase Margin: %.1f deg at %.1f kHz\n', Pm_i, Wcp_i/(2*pi*1e3));
+    fprintf('  Crossover:    %.1f kHz\n', Wcp_i/(2*pi*1e3));
+end
+
+% Keep backward-compat scalars from the selected large-signal set
+K1 = K_all(LARGE_SIGNAL_SET_IDX, 1);
+K2 = K_all(LARGE_SIGNAL_SET_IDX, 2);
+K3 = K_all(LARGE_SIGNAL_SET_IDX, 3);
 
 fprintf('\n===== ADC/DAC/DIGITAL GAIN BUDGET =====\n');
 fprintf('  Mode:                  %s\n', adc_dac_mode_text);
@@ -279,31 +293,20 @@ fprintf('  Digital scaling (>>6): %.6e\n', G_digital);
 fprintf('  DAC gain:              %.6e\n', G_DAC);
 fprintf('  Total gain:            %.6e (%.1f dB)\n', G_total, 20*log10(G_total));
 
-fprintf('\n===== STABILITY SUMMARY =====\n');
-fprintf('Digital Loop:\n');
-fprintf('  Gain Margin:  %.1f dB at %.1f kHz\n', 20*log10(Gm_dig), Wcg_dig/(2*pi*1e3));
-fprintf('  Phase Margin: %.1f deg at %.1f kHz\n', Pm_dig, Wcp_dig/(2*pi*1e3));
-fprintf('  Crossover:    %.1f kHz\n', Wcp_dig/(2*pi*1e3));
-
-fprintf('Analog Loop:\n');
+fprintf('\nAnalog Reference Loop:\n');
 fprintf('  Gain Margin:  %.1f dB at %.1f kHz\n', 20*log10(Gm_ana), Wcg_ana/(2*pi*1e3));
 fprintf('  Phase Margin: %.1f deg at %.1f kHz\n', Pm_ana, Wcp_ana/(2*pi*1e3));
 fprintf('  Crossover:    %.1f kHz\n', Wcp_ana/(2*pi*1e3));
-
-fprintf('Phase Margin Loss (digital vs analog): %.1f deg\n', Pm_ana - Pm_dig);
 
 %% ==================== BODE PLOTS ====================
 if PLOT_BODE_GRAPHS
     w = 2*pi*logspace(0, 8, 2000);
 
-    % Original plot windows
+    % Plant & analog reference (gain-independent)
     figure; margin(Gvc, w);    grid on; title('Plant: Gvc = Vout/Vc');
     figure; margin(Hadc, w);   grid on; title('ADC: Hadc');
-    figure; margin(Hpid, w);   grid on; title(controller_title);
-    figure; margin(Hdig, w);   grid on; title('Digital Compensator Chain');
     figure; margin(Hc, w);     grid on; title('Analog Compensator Hc');
     figure; margin(Lc, w);     grid on; title('Analog Loop Gain');
-    figure; margin(Lloop, w);  grid on; title('Digital Loop Gain');
 
     % Comparison plots with identical phase branch and limits
     opts = bodeoptions;
@@ -313,27 +316,55 @@ if PLOT_BODE_GRAPHS
     opts.FreqUnits = 'Hz';
     opts.XLimMode = 'manual';
     opts.XLim = [1 1e8];
+    plot_colors = lines(N_SETS);
 
-    figure;
-    bodeplot(Hc, Hpid, w, opts);
-    title('Compensator Comparison: Analog Hc vs Digital Hpid');
-    legend('Analog Hc', 'Digital Hpid', 'Location', 'best');
-    % force_bode_phase_ylim(gcf, PHASE_YLIM);
+    % Build margin-annotated labels for closed-loop plots
+    labels_margin = cell(1, N_SETS);
+    for iset = 1:N_SETS
+        labels_margin{iset} = sprintf('%s (PM=%.1f° GM=%.1fdB)', ...
+            labels{iset}, Pm_dig_all(iset), 20*log10(Gm_dig_all(iset)));
+    end
+    label_ana_margin = sprintf('Analog (PM=%.1f° GM=%.1fdB)', Pm_ana, 20*log10(Gm_ana));
 
+    % Digital Compensator Chain — all sets overlaid
     figure;
-    bodeplot(Lc, Lloop, w, opts);
-    title('Loop Gain Comparison: Analog vs Digital');
-    legend('Analog Loop', 'Digital Loop', 'Location', 'best');
-    % force_bode_phase_ylim(gcf, PHASE_YLIM);
+    bodeplot(Hdig_all{:}, w, opts);
+    legend(labels, 'Location', 'best');
+    title('Digital Compensator Chain — All Sets');
+
+    % Digital Loop Gain — all sets overlaid
+    figure;
+    bodeplot(Lloop_all{:}, w, opts);
+    legend(labels_margin, 'Location', 'best');
+    title('Digital Loop Gain — All Sets');
+
+    % PID Controller — all sets overlaid
+    figure;
+    bodeplot(Hpid_all{:}, w, opts);
+    legend(labels, 'Location', 'best');
+    title('PID Controller Hpid — All Sets');
+
+    % Compensator comparison: Analog Hc vs all digital Hpid sets
+    figure;
+    bodeplot(Hc, Hpid_all{:}, w, opts);
+    legend(['Analog Hc', labels], 'Location', 'best');
+    title('Compensator Comparison: Analog Hc vs Digital Hpid Sets');
+
+    % Loop gain comparison: Analog vs all digital sets
+    figure;
+    bodeplot(Lc, Lloop_all{:}, w, opts);
+    legend([{label_ana_margin}, labels_margin], 'Location', 'best');
+    title('Loop Gain Comparison: Analog vs Digital Sets');
 end
 
 %% ==================== STEP RESPONSE ====================
 if PLOT_SMALL_SIGNAL_GRAPHS
     figure;
     subplot(2,1,1);
-    step(Tloop);
+    step(Tloop_all{:});
     grid on;
-    title('Digital Closed-Loop Step Response');
+    legend(labels_margin, 'Location', 'best');
+    title('Digital Closed-Loop Step Response — All Sets');
 
     subplot(2,1,2);
     step(Tc);
@@ -342,20 +373,22 @@ if PLOT_SMALL_SIGNAL_GRAPHS
 end
 
 %% ==================== PHASE BUDGET ====================
-fprintf('\n===== PHASE BUDGET AT CROSSOVER (%.0f kHz) =====\n', fc/1e3);
+for iset = 1:N_SETS
+    fprintf('\n===== PHASE BUDGET AT CROSSOVER (%.0f kHz) — %s =====\n', fc/1e3, labels{iset});
 
-blocks = {Hadc, Hpid, Hdac, Hblank, Delay, Gvc*H};
-names  = {'ADC', controller_phase_name, 'DAC', 'Blanking', 'CompDelay', 'Plant*H'};
+    blocks = {Hadc, Hpid_all{iset}, Hdac, Hblank, Delay, Gvc*H};
+    names  = {'ADC', controller_phase_name, 'DAC', 'Blanking', 'CompDelay', 'Plant*H'};
 
-total_phase = 0;
-for k = 1:length(blocks)
-    [~, ph] = bode(blocks{k}, 2*pi*fc);
-    ph = squeeze(ph);
-    fprintf('  %-12s: %+7.1f deg\n', names{k}, ph);
-    total_phase = total_phase + ph;
+    total_phase = 0;
+    for k = 1:length(blocks)
+        [~, ph] = bode(blocks{k}, 2*pi*fc);
+        ph = squeeze(ph);
+        fprintf('  %-12s: %+7.1f deg\n', names{k}, ph);
+        total_phase = total_phase + ph;
+    end
+    fprintf('  %-12s: %+7.1f deg\n', 'TOTAL', total_phase);
+    fprintf('  %-12s: %+7.1f deg\n', 'Phase Margin', total_phase + 180);
 end
-fprintf('  %-12s: %+7.1f deg\n', 'TOTAL', total_phase);
-fprintf('  %-12s: %+7.1f deg\n', 'Phase Margin', total_phase + 180);
 
 %% ==================== NOTES ====================
 fprintf('\n===== NOTES =====\n');
@@ -364,30 +397,23 @@ fprintf('2. The >>6 is represented explicitly as G_digital = 1/64.\n');
 fprintf('3. ADC/DAC mode: %s.\n', adc_dac_mode_text);
 fprintf('4. For AMS load-step correlation, a nonlinear cycle-by-cycle model is still recommended.\n');
 
-%% ==================== LAB POSITION REPORT ====================
-[P_lab, I_lab, D_lab] = k123_to_lab_position(K1, K2, K3);
-[Kp_eff_from_rtl, Ki_eff_from_rtl, Kd_eff_from_rtl] = ...
-    lab_position_to_shifted_pid(P_lab, I_lab, D_lab, Tctrl, G_digital);
+%% ==================== LAB POSITION REPORT (all sets) ====================
+for iset = 1:N_SETS
+    K1_s = K_all(iset,1); K2_s = K_all(iset,2); K3_s = K_all(iset,3);
+    [P_lab, I_lab, D_lab] = k123_to_lab_position(K1_s, K2_s, K3_s);
+    [Kp_eff_from_rtl, Ki_eff_from_rtl, Kd_eff_from_rtl] = ...
+        lab_position_to_shifted_pid(P_lab, I_lab, D_lab, Tctrl, G_digital);
 
-fprintf('\n===== LAB POSITION REPORT =====\n');
-fprintf('From current RTL coefficients:\n');
-fprintf('  K1 = %d\n', K1);
-fprintf('  K2 = %d\n', K2);
-fprintf('  K3 = %d\n', K3);
-
-fprintf('\nRecovered lab positions:\n');
-fprintf('  Position[0] (P) = %d\n', round(P_lab));
-fprintf('  Position[1] (I) = %d\n', round(I_lab));
-fprintf('  Position[2] (D) = %d\n', round(D_lab));
-
-fprintf('\nEffective controller PID from recovered lab positions (Tctrl-based, after >>6):\n');
-fprintf('  Kp_eff = %.6f\n', Kp_eff_from_rtl);
-fprintf('  Ki_eff = %.6e\n', Ki_eff_from_rtl);
-fprintf('  Kd_eff = %.6e\n', Kd_eff_from_rtl);
-
-fprintf('\nProgramming line using lab positions:\n');
-fprintf('  ChipTC.FullChip.Power.SetPIDCofficients(1, %d, %d, %d);\n', ...
-    round(P_lab), round(I_lab), round(D_lab));
+    fprintf('\n===== LAB POSITION REPORT — %s =====\n', labels{iset});
+    fprintf('  K1 = %d   K2 = %d   K3 = %d\n', K1_s, K2_s, K3_s);
+    fprintf('  Position[0] (P) = %d\n', round(P_lab));
+    fprintf('  Position[1] (I) = %d\n', round(I_lab));
+    fprintf('  Position[2] (D) = %d\n', round(D_lab));
+    fprintf('  Kp_eff = %.6f   Ki_eff = %.6e   Kd_eff = %.6e\n', ...
+        Kp_eff_from_rtl, Ki_eff_from_rtl, Kd_eff_from_rtl);
+    fprintf('  ChipTC.FullChip.Power.SetPIDCofficients(1, %d, %d, %d);\n', ...
+        round(P_lab), round(I_lab), round(D_lab));
+end
 
 P_in = 1;
 I_in = 1;
@@ -412,12 +438,20 @@ fprintf('  Kp_eff = %.6f\n', Kp_eff_lab);
 fprintf('  Ki_eff = %.6e\n', Ki_eff_lab);
 fprintf('  Kd_eff = %.6e\n', Kd_eff_lab);
 
-K1=3008;
-K2=-3940;
-K3=936;
+%K1=3008;
+%K2=-3940;
+%K3=936;
 
-[Kp_out, Ki_out, Kd_out] = k123_to_pid(K1, K2, K3, Tctrl);
-[Kp_eff, Ki_eff, Kd_eff] = lab_position_to_shifted_pid(P_in, I_in, D_in, Ts, G_digital)
+%K1=4261;
+%K2=-5279;
+%K3=1023;
+
+
+[P_real, I_real, D_real] = k123_to_pid(K1, K2, K3, Tctrl);
+
+Kp_eff=P_real*G_digital;
+Ki_eff=I_real*G_digital;
+Kd_eff=D_real*G_digital;
 
 fprintf('\nEffective controller PID from K1,K2,K3 (Tctrl-based, after >>6):\n');
 fprintf('  Kp_eff = %.6f\n', Kp_eff);
@@ -503,7 +537,9 @@ function b = signed_code_to_bin(val, nbits)
 end
 
 %% ==================== LARGE-SIGNAL PREDICTOR ====================
+% Uses gain set index LARGE_SIGNAL_SET_IDX (K1/K2/K3 already selected above)
 if RUN_LARGE_SIGNAL_PREDICTOR
+    fprintf('\n===== LARGE-SIGNAL PREDICTOR using %s =====\n', labels{LARGE_SIGNAL_SET_IDX});
     ls_cfg = struct;
     ls_cfg.Ts = Tctrl;           % keep K1/K2/K3 normalization on switching period
     ls_cfg.Tctrl = Tctrl;     % PID control-output refresh rate = 256 MHz
@@ -536,7 +572,16 @@ if RUN_LARGE_SIGNAL_PREDICTOR
     ls_cfg.use_quantized_adc_dac = USE_QUANTIZED_ADC_DAC;
     ls_cfg.use_preclamp_state = USE_PRECLAMP_STATE;
 
-    [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predictor(Gvc, ls_cfg);
+    ls_cfg.load_step_enable = LOAD_STEP_ENABLE;
+    ls_cfg.load_step_i0 = LOAD_STEP_I0;
+    ls_cfg.load_step_di = LOAD_STEP_DI;
+    ls_cfg.load_step_delay = LOAD_STEP_DELAY;
+    ls_cfg.load_step_rise = LOAD_STEP_RISE;
+    ls_cfg.load_step_width = LOAD_STEP_WIDTH;
+    ls_cfg.load_step_fall = LOAD_STEP_FALL;
+    
+    [t, vout, e_hist, u_hist, pid_hist, vdac_hist, iload_hist] = ...
+        run_large_signal_predictor(Gvc, Gload, ls_cfg);
 
     fprintf('\n===== LARGE-SIGNAL PREDICTOR =====\n');
     fprintf('  K1/K2/K3 normalization Ts: %.3f ns\n', ls_cfg.Ts*1e9);
@@ -549,26 +594,58 @@ if RUN_LARGE_SIGNAL_PREDICTOR
     fprintf('  Peak PID code:     %.1f\n', max(abs(pid_hist - PID_OUT_OFFSET)));
     fprintf('  DAC output range:  %.4f V to %.4f V\n', min(vdac_hist), max(vdac_hist));
 
+    if ls_cfg.load_step_enable
+        pre_window_s = 2e-6;
+        post_window_s = 20e-6;
+        idx_pre = (t >= max(0, ls_cfg.load_step_delay - pre_window_s)) & ...
+                  (t < ls_cfg.load_step_delay);
+        idx_post = (t >= ls_cfg.load_step_delay) & ...
+                   (t <= min(ls_cfg.tstop, ls_cfg.load_step_delay + post_window_s));
+
+        if any(idx_pre)
+            vout_pre = mean(vout(idx_pre));
+        else
+            vout_pre = vout(1);
+        end
+
+        if any(idx_post)
+            vout_min_post = min(vout(idx_post));
+            [~, idx_local_min] = min(vout(idx_post));
+            t_post = t(idx_post);
+            t_min_post = t_post(idx_local_min);
+        else
+            vout_min_post = min(vout);
+            t_min_post = t(1);
+        end
+
+        fprintf('  Load step Iload:   %.3f A -> %.3f A at %.1f us\n', ...
+            ls_cfg.load_step_i0, ls_cfg.load_step_i0 + ls_cfg.load_step_di, ...
+            ls_cfg.load_step_delay*1e6);
+        fprintf('  Pre-step Vout:     %.4f V\n', vout_pre);
+        fprintf('  Post-step min:     %.4f V at %.2f us\n', vout_min_post, t_min_post*1e6);
+        fprintf('  Load-step dip:     %.2f mV\n', (vout_pre - vout_min_post)*1e3);
+    end
+
     if PLOT_LARGE_SIGNAL_GRAPHS
         figure;
-        subplot(5,1,1);
+        subplot(6,1,1);
         plot(t*1e6, vout, 'LineWidth', 1.2);
         grid on;
         ylabel('Vout (V)');
         title('Large-Signal Predictor');
         ylim([0 0.9]);
 
-        subplot(5,1,2);
+        subplot(6,1,2);
         plot(t*1e6, e_hist, 'LineWidth', 1.2);
         grid on;
         ylabel('Error');
 
-        subplot(5,1,3);
+        subplot(6,1,3);
         plot(t*1e6, u_hist, 'LineWidth', 1.2);
         grid on;
         ylabel('u state');
 
-        subplot(5,1,4);
+        subplot(6,1,4);
         plot(t*1e6, pid_hist, 'LineWidth', 1.2);
         grid on;
         ylabel('PID code');
@@ -576,23 +653,58 @@ if RUN_LARGE_SIGNAL_PREDICTOR
             apply_binary_yaxis(gca, PID_OUT_BITS);
         end
 
-        subplot(5,1,5);
+        subplot(6,1,5);
         plot(t*1e6, vdac_hist, 'LineWidth', 1.2);
         grid on;
-        xlabel('Time (\mus)');
         ylabel('DAC out (V)');
         if PLOT_BINARY_CODE_AXIS
             apply_binary_yaxis(gca, N_DAC);
         end
+
+        subplot(6,1,6);
+        plot(t*1e6, iload_hist*1e3, 'LineWidth', 1.2);
+        grid on;
+        xlabel('Time (\mus)');
+        ylabel('Iload (mA)');
+        title('Load Step Profile');
+
+        if ls_cfg.load_step_enable
+            t_zoom_start = max(0, ls_cfg.load_step_delay - 5e-6);
+            t_zoom_end = min(ls_cfg.tstop, ls_cfg.load_step_delay + 20e-6);
+            idx_zoom = (t >= t_zoom_start) & (t <= t_zoom_end);
+
+            if any(idx_zoom)
+                figure;
+                subplot(2,1,1);
+                plot(t(idx_zoom)*1e6, vout(idx_zoom), 'LineWidth', 1.2);
+                grid on;
+                ylabel('Vout (V)');
+                title('Load-Step Zoom');
+
+                subplot(2,1,2);
+                yyaxis left;
+                plot(t(idx_zoom)*1e6, (vout(idx_zoom) - vout_pre)*1e3, 'LineWidth', 1.2);
+                ylabel('dVout (mV)');
+                yyaxis right;
+                plot(t(idx_zoom)*1e6, iload_hist(idx_zoom)*1e3, 'LineWidth', 1.2);
+                ylabel('Iload (mA)');
+                grid on;
+                xlabel('Time (\mus)');
+            end
+        end
     end
 end
 
-function [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predictor(Gvc, cfg)
-    sysd = c2d(ss(minreal(Gvc)), cfg.Tctrl, 'zoh');
-    [Ad, Bd, Cd, Dd] = ssdata(sysd);
+function [t, vout, e_hist, u_hist, pid_hist, vdac_hist, iload_hist] = run_large_signal_predictor(Gvc, Gload, cfg)
+    sysd_ctrl = c2d(ss(minreal(Gvc)), cfg.Tctrl, 'zoh');
+    [Ad_ctrl, Bd_ctrl, Cd_ctrl, Dd_ctrl] = ssdata(sysd_ctrl);
+
+    sysd_load = c2d(ss(minreal(Gload)), cfg.Tctrl, 'zoh');
+    [Ad_load, Bd_load, Cd_load, Dd_load] = ssdata(sysd_load);
 
     N  = floor(cfg.tstop / cfg.Tctrl) + 1;
-    nx = size(Ad, 1);
+    nx_ctrl = size(Ad_ctrl, 1);
+    nx_load = size(Ad_load, 1);
 
     t = (0:N-1) * cfg.Tctrl;
     vout = zeros(1, N);
@@ -600,11 +712,13 @@ function [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predi
     u_hist = zeros(1, N);
     pid_hist = zeros(1, N);
     vdac_hist = zeros(1, N);
+    iload_hist = zeros(1, N);
 
     dv0 = cfg.VOUT_INIT - cfg.VOUT_NOM;
-    x = zeros(nx, 1);
-    if ~isempty(Cd)
-        x = pinv(Cd) * dv0;
+    x_ctrl = zeros(nx_ctrl, 1);
+    x_load = zeros(nx_load, 1);
+    if ~isempty(Cd_ctrl)
+        x_ctrl = pinv(Cd_ctrl) * dv0;
     end
 
     e1 = 0;
@@ -637,11 +751,19 @@ function [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predi
     v_dac_filt = v_dac_mid;
 
     for k = 1:N
-        dvout = Cd*x;
-        if ~isempty(Dd)
-            dvout = dvout + Dd*0;
+        di_load = load_step_profile(t(k), cfg);
+        iload_hist(k) = cfg.load_step_i0 + di_load;
+
+        dvout_ctrl = Cd_ctrl*x_ctrl;
+        if ~isempty(Dd_ctrl)
+            dvout_ctrl = dvout_ctrl + Dd_ctrl*0;
         end
-        dvout = double(dvout(1));
+        dvout_load = Cd_load*x_load;
+        if ~isempty(Dd_load)
+            dvout_load = dvout_load + Dd_load*di_load;
+        end
+
+        dvout = double(dvout_ctrl(1) + dvout_load(1));
         vout(k) = cfg.VOUT_NOM + dvout;
 
         vfb = cfg.beta * vout(k);
@@ -681,7 +803,8 @@ function [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predi
         % Small-signal plant input is deviation from midscale analog DAC output
         u_plant = v_dac_filt - v_dac_mid;
 
-        x = Ad*x + Bd*u_plant;
+        x_ctrl = Ad_ctrl*x_ctrl + Bd_ctrl*u_plant;
+        x_load = Ad_load*x_load + Bd_load*di_load;
 
         e_hist(k) = e0;
         u_hist(k) = u_sat;
@@ -690,6 +813,42 @@ function [t, vout, e_hist, u_hist, pid_hist, vdac_hist] = run_large_signal_predi
 
         e2 = e1;
         e1 = e0;
+    end
+end
+
+function di = load_step_profile(t, cfg)
+    if ~cfg.load_step_enable
+        di = 0;
+        return;
+    end
+
+    di = 0;
+
+    if t < cfg.load_step_delay
+        return;
+    end
+
+    rise_end = cfg.load_step_delay + cfg.load_step_rise;
+
+    if t < rise_end
+        di = cfg.load_step_di * (t - cfg.load_step_delay) / max(cfg.load_step_rise, eps);
+        return;
+    end
+
+    if isinf(cfg.load_step_width)
+        di = cfg.load_step_di;
+        return;
+    end
+
+    high_end = rise_end + cfg.load_step_width;
+    fall_end = high_end + cfg.load_step_fall;
+
+    if t < high_end
+        di = cfg.load_step_di;
+    elseif t < fall_end
+        di = cfg.load_step_di * (1 - (t - high_end) / max(cfg.load_step_fall, eps));
+    else
+        di = 0;
     end
 end
 
